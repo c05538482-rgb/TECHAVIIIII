@@ -167,7 +167,11 @@ async function reef(path, body) {
     });
     const json = await r.json().catch(() => ({}));
     if (!r.ok || json.ok === false) {
+      const code = json?.error?.code || json?.error?.status || r.status;
       const msg = json?.error?.message || json?.error || `ReefAPI HTTP ${r.status}`;
+      if (r.status === 429 || String(code).toUpperCase() === "RATE_LIMITED") {
+        throw Object.assign(new Error(`ReefAPI rate limit: ${String(msg)}`), { code: "RATE_LIMITED", retryable: true });
+      }
       throw new Error(String(msg));
     }
     const charged = Number(
@@ -337,7 +341,7 @@ async function enrichN11Rows(rows) {
 
   const enriched = new Array(rows.length);
   let next = 0;
-  const workerCount = Math.min(4, rows.length);
+  const workerCount = Math.min(1, rows.length);
 
   async function worker() {
     while (true) {
@@ -1027,31 +1031,39 @@ app.get("/api/search", async (req, res) => {
   const query = normalizeQuery(req.query.q);
   if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
 
-  // ReefAPI mağazalarını küçük gruplar halinde çalıştırıyoruz. Böylece 10 mağazayı
-  // aynı anda ateşleyip rate-limit / bağlantı yarışına girmiyoruz. Amazon ayrı kalır.
   const stores = [
     "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
-    "amazon", "pazarama", "ciceksepeti", "boyner", "boyner"
+    "amazon", "pazarama", "ciceksepeti", "boyner"
   ];
   const results = {};
   const errors = {};
 
-  const runBatch = async (batch) => {
-    const settled = await Promise.allSettled(batch.map(s => searchStore(s, query)));
-    settled.forEach((r, i) => {
-      const store = batch[i];
+  async function searchWithRetry(store) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await searchStore(store, query);
+      } catch (e) {
+        if (e?.code !== "RATE_LIMITED" || attempt === 2) throw e;
+        await new Promise(resolve => setTimeout(resolve, 2200));
+      }
+    }
+  }
+
+  // ReefAPI is deliberately kept below its short rolling request limit.
+  // Two stores at a time is slower than a burst, but prevents one search from
+  // making every other store fail with RATE_LIMITED. Amazon remains independent.
+  for (let i = 0; i < stores.length; i += 2) {
+    const batch = stores.slice(i, i + 2);
+    const settled = await Promise.allSettled(batch.map(store => searchWithRetry(store)));
+    settled.forEach((r, idx) => {
+      const store = batch[idx];
       if (r.status === "fulfilled") results[store] = r.value;
       else {
         errors[store] = r.reason?.message || "Arama başarısız";
         console.error(`[SEARCH][${store}]`, r.reason);
       }
     });
-  };
-
-  // 3 Reef çağrısı + Amazon. Sonra kalan Reef çağrıları 3'erli gruplar halinde.
-  await runBatch(["trendyol", "hepsiburada", "n11", "amazon"]);
-  await runBatch(["mediamarkt", "teknosa", "vatan"]);
-  await runBatch(["pazarama", "ciceksepeti", "boyner"]);
+  }
 
   const products = Object.values(results).flatMap(x => x.products || []);
   const usage = Object.fromEntries(

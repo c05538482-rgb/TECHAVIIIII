@@ -62,7 +62,8 @@ function storeName(s) {
     vatan:"Vatan Bilgisayar",
     amazon:"Amazon Türkiye",
     pazarama:"Pazarama",
-    ciceksepeti:"Çiçeksepeti"
+    ciceksepeti:"Çiçeksepeti",
+    boyner:"Boyner"
   }[String(s).toLowerCase()] || s || "Mağaza");
 }
 function storeKey(s) {
@@ -76,6 +77,7 @@ function storeKey(s) {
   if (x.includes("amazon")) return "amazon";
   if (x.includes("pazarama")) return "pazarama";
   if (x.includes("ciceksepeti") || x.includes("çiçeksepeti")) return "ciceksepeti";
+  if (x.includes("boyner") || x.includes("morhipo")) return "boyner";
   return x;
 }
 function storeKey(s) {
@@ -186,7 +188,7 @@ function showLoading(q) {
   renderApiUsage(null);
   $("#sectionTitle").textContent = `🔎 "${q}" aranıyor`;
   $("#resultCount").textContent = "• mağazalar kontrol ediliyor...";
-  $("#grid").innerHTML = `<div class="loading-grid"><div class="loading-spinner"></div><span>Trendyol, Hepsiburada, n11, MediaMarkt, Teknosa, Vatan ve Amazon Türkiye aranıyor…</span></div>`;
+  $("#grid").innerHTML = `<div class="loading-grid"><div class="loading-spinner"></div><span>Trendyol, Hepsiburada, n11, MediaMarkt, Teknosa, Vatan, Amazon, Pazarama, Çiçeksepeti ve Boyner aranıyor…</span></div>`;
 }
 
 async function searchProducts(q) {
