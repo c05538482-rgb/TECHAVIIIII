@@ -1027,53 +1027,42 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-const SEARCH_STORES = [
-  "amazon", "trendyol", "hepsiburada", "n11", "mediamarkt",
-  "teknosa", "vatan", "pazarama", "ciceksepeti", "boyner"
-];
-
-async function searchWithRetry(store, query) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      return await searchStore(store, query);
-    } catch (e) {
-      if (e?.code !== "RATE_LIMITED" || attempt === 3) throw e;
-      await new Promise(resolve => setTimeout(resolve, 2500));
-    }
-  }
-}
-
-// One store at a time is intentional. ReefAPI has a short rolling request limit;
-// parallel Reef calls can make otherwise-valid stores fail while Amazon still works.
-app.get("/api/search/store", async (req, res) => {
-  const query = normalizeQuery(req.query.q);
-  const store = String(req.query.store || "").trim().toLowerCase();
-  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
-  if (!SEARCH_STORES.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
-
-  try {
-    const result = await searchWithRetry(store, query);
-    res.json({ ok: true, query, store, result });
-  } catch (e) {
-    console.error(`[SEARCH][${store}]`, e);
-    res.status(502).json({ ok: false, query, store, error: e?.message || "Arama başarısız" });
-  }
-});
-
 app.get("/api/search", async (req, res) => {
   const query = normalizeQuery(req.query.q);
   if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
 
+  const stores = [
+    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
+    "amazon", "pazarama", "ciceksepeti", "boyner"
+  ];
   const results = {};
   const errors = {};
 
-  for (const store of SEARCH_STORES) {
-    try {
-      results[store] = await searchWithRetry(store, query);
-    } catch (e) {
-      errors[store] = e?.message || "Arama başarısız";
-      console.error(`[SEARCH][${store}]`, e);
+  async function searchWithRetry(store) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await searchStore(store, query);
+      } catch (e) {
+        if (e?.code !== "RATE_LIMITED" || attempt === 2) throw e;
+        await new Promise(resolve => setTimeout(resolve, 2200));
+      }
     }
+  }
+
+  // ReefAPI is deliberately kept below its short rolling request limit.
+  // Two stores at a time is slower than a burst, but prevents one search from
+  // making every other store fail with RATE_LIMITED. Amazon remains independent.
+  for (let i = 0; i < stores.length; i += 2) {
+    const batch = stores.slice(i, i + 2);
+    const settled = await Promise.allSettled(batch.map(store => searchWithRetry(store)));
+    settled.forEach((r, idx) => {
+      const store = batch[idx];
+      if (r.status === "fulfilled") results[store] = r.value;
+      else {
+        errors[store] = r.reason?.message || "Arama başarısız";
+        console.error(`[SEARCH][${store}]`, r.reason);
+      }
+    });
   }
 
   const products = Object.values(results).flatMap(x => x.products || []);
