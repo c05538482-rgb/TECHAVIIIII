@@ -196,98 +196,72 @@ async function searchProducts(q) {
   state.query = clean;
   state.activeStore = "all";
 
-  if (state.controller) {
-    try { state.controller.abort(); } catch (_) {}
-  }
+  if (state.controller) state.controller.abort();
   const myId = ++state.requestId;
 
-  const emptyCounts = () => ({
-    trendyol: null,
-    hepsiburada: null,
-    n11: null,
-    mediamarkt: null,
-    teknosa: null,
-    vatan: null,
-    amazon: null,
-    pazarama: null,
-    ciceksepeti: null,
-    boyner: null
-  });
+  const emptyCounts = {
+    trendyol: null, hepsiburada: null, n11: null, mediamarkt: null,
+    teknosa: null, vatan: null, amazon: null, pazarama: null,
+    ciceksepeti: null, boyner: null
+  };
 
   if (clean.length < 2) {
     state.allProducts = [];
-    state.storeCounts = emptyCounts();
+    state.storeCounts = emptyCounts;
     renderStoreCounts();
     render();
     return;
   }
 
   showLoading(clean);
+  const controller = new AbortController();
+  state.controller = controller;
+
+  // Each store gets its own request. Results are painted as soon as that
+  // store finishes; no extra provider calls are made.
+  const stores = [
+    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa",
+    "vatan", "amazon", "pazarama", "ciceksepeti", "boyner"
+  ];
+  const results = {};
+  const errors = {};
+  const usage = { stores: {}, totalReefCredits: 0, totalBrightDataRecords: 0 };
+
   state.allProducts = [];
-  state.storeCounts = emptyCounts();
+  state.storeCounts = { ...emptyCounts };
   renderStoreCounts();
   render();
 
-  const controller = new AbortController();
-  state.controller = controller;
-  const stores = [
-    "amazon",
-    "trendyol",
-    "hepsiburada",
-    "n11",
-    "mediamarkt",
-    "teknosa",
-    "vatan",
-    "pazarama",
-    "ciceksepeti",
-    "boyner"
-  ];
-  const usageStores = {};
-  const errors = [];
-
-  // ReefAPI has a short rolling request limit. We therefore do NOT fire all
-  // ReefAPI stores at the same millisecond. Instead, requests are staggered
-  // by 1200ms. Each store still makes exactly one search request (plus the
-  // existing n11/Trendyol detail enrichment), so API credit usage is unchanged.
-  // Results are rendered immediately when each store finishes; a slow store
-  // no longer blocks already-completed stores from appearing on screen.
-  const runStore = async (store, index) => {
-    if (index > 0) {
-      await new Promise(resolve => setTimeout(resolve, 1200 * index));
-    }
-    if (myId !== state.requestId || controller.signal.aborted) return;
-
+  const runStore = async (store) => {
     try {
       const r = await fetch(`/api/search/store?store=${encodeURIComponent(store)}&q=${encodeURIComponent(clean)}`, {
         signal: controller.signal,
         headers: { Accept: "application/json" }
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || `${store} araması başarısız`);
+      if (!r.ok || !j.ok) throw new Error(j.error || "Arama başarısız.");
+      if (myId !== state.requestId) return;
 
       const result = j.result || {};
-      state.storeCounts[store] = Number(result.count || 0);
-      if (Array.isArray(result.products)) {
-        state.allProducts.push(...result.products);
-      }
-      usageStores[store] = result.usage || {
-        reefCredits: 0,
-        brightDataRecords: 0,
-        cached: Boolean(result.cached)
-      };
+      results[store] = result;
+      state.storeCounts[store] = Number(result.count ?? 0);
+      const rows = Array.isArray(result.products) ? result.products : [];
+      state.allProducts.push(...rows);
 
-      if (myId !== state.requestId) return;
+      usage.stores[store] = result.usage || {
+        provider: store === "amazon" ? "Bright Data" : "ReefAPI",
+        reefCredits: 0, brightDataRecords: 0, cached: Boolean(result.cached)
+      };
+      usage.totalReefCredits = Object.values(usage.stores).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
+      usage.totalBrightDataRecords = Object.values(usage.stores).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
+
       renderStoreCounts();
       render();
-      const totalReefCredits = Object.values(usageStores)
-        .reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
-      const totalBrightDataRecords = Object.values(usageStores)
-        .reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
-      renderApiUsage({ stores: usageStores, totalReefCredits, totalBrightDataRecords });
+      renderApiUsage(usage);
     } catch (e) {
       if (e.name === "AbortError") return;
       if (myId !== state.requestId) return;
-      errors.push(`${store}: ${e.message}`);
+      errors[store] = e.message || "Arama başarısız";
       state.storeCounts[store] = 0;
       renderStoreCounts();
       render();
@@ -295,29 +269,19 @@ async function searchProducts(q) {
   };
 
   try {
-    await Promise.allSettled(stores.map(runStore));
-  } finally {
-    if (myId === state.requestId) {
-      state.controller = null;
+    await Promise.all(stores.map(runStore));
+    if (myId !== state.requestId) return;
+    if (!Object.keys(results).length) {
+      renderApiUsage(usage);
+      $("#resultCount").textContent = "";
+      $("#grid").innerHTML = `<div class="empty-grid"><div><b>Mağazalardan veri alınamadı.</b><br><span>ReefAPI anahtarını ve Render ortam değişkenlerini kontrol et.</span></div></div>`;
+    } else if (Object.keys(errors).length) {
+      toast(`${Object.keys(results).length} mağaza yanıt verdi; ${Object.keys(errors).length} mağaza yanıt vermedi.`);
     }
-  }
-
-  if (myId !== state.requestId) return;
-
-  if (!state.allProducts.length) {
-    const disabled = errors.some(e => /account was disabled|unauthorised use|reefapi/i.test(e));
-    renderApiUsage({
-      stores: usageStores,
-      totalReefCredits: Object.values(usageStores).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0),
-      totalBrightDataRecords: Object.values(usageStores).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0)
-    });
-    $("#sectionTitle").textContent = `🔎 "${clean}"`;
-    $("#resultCount").textContent = "• sonuç bulunamadı";
-    $("#grid").innerHTML = disabled
-      ? `<div class="empty-grid"><div><b>ReefAPI mağaza bağlantısı çalışmıyor.</b><br><span>Render → Environment Variables → REEF_API_KEY değerinin güncel ReefAPI anahtarı olduğundan emin ol.</span></div></div>`
-      : `<div class="empty-grid"><div><b>Bu aramada ürün bulunamadı.</b><br><span>Mağazaların yanıtlarını ve API bağlantısını kontrol et.</span></div></div>`;
-  } else if (errors.length) {
-    toast(`${errors.length} mağaza yanıt vermedi; çalışan mağazaların sonuçları gösteriliyor.`);
+  } catch (e) {
+    if (e.name !== "AbortError" && myId === state.requestId) toast(e.message || "Arama başarısız.");
+  } finally {
+    if (myId === state.requestId) state.controller = null;
   }
 }
 

@@ -151,7 +151,12 @@ async function setCache(key, payload, ttlSeconds = CACHE_TTL) {
   `, [key, JSON.stringify(payload), ttlSeconds]);
 }
 
-async function reef(path, body) {
+// ReefAPI uses a shared short rolling request limit. Keep all Reef calls in
+// one small queue so a single search never bursts several marketplace calls
+// at once. Amazon/Bright Data stays independent and can run in parallel.
+let reefQueue = Promise.resolve();
+
+async function reefRequest(path, body) {
   if (!REEF_API_KEY) throw new Error("REEF_API_KEY Render'da tanımlı değil.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
@@ -189,6 +194,12 @@ async function reef(path, body) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function reef(path, body) {
+  const run = reefQueue.then(() => reefRequest(path, body));
+  reefQueue = run.catch(() => {});
+  return run;
 }
 
 function num(v) {
@@ -1027,44 +1038,23 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-app.get("/api/search", async (req, res) => {
-  const query = normalizeQuery(req.query.q);
-  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
+const SEARCH_STORES = [
+  "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
+  "amazon", "pazarama", "ciceksepeti", "boyner"
+];
 
-  const stores = [
-    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
-    "amazon", "pazarama", "ciceksepeti", "boyner"
-  ];
-  const results = {};
-  const errors = {};
-
-  async function searchWithRetry(store) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        return await searchStore(store, query);
-      } catch (e) {
-        if (e?.code !== "RATE_LIMITED" || attempt === 2) throw e;
-        await new Promise(resolve => setTimeout(resolve, 2200));
-      }
+async function searchWithRetry(store, query) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await searchStore(store, query);
+    } catch (e) {
+      if (e?.code !== "RATE_LIMITED" || attempt === 2) throw e;
+      await new Promise(resolve => setTimeout(resolve, 2500));
     }
   }
+}
 
-  // ReefAPI is deliberately kept below its short rolling request limit.
-  // Two stores at a time is slower than a burst, but prevents one search from
-  // making every other store fail with RATE_LIMITED. Amazon remains independent.
-  for (let i = 0; i < stores.length; i += 2) {
-    const batch = stores.slice(i, i + 2);
-    const settled = await Promise.allSettled(batch.map(store => searchWithRetry(store)));
-    settled.forEach((r, idx) => {
-      const store = batch[idx];
-      if (r.status === "fulfilled") results[store] = r.value;
-      else {
-        errors[store] = r.reason?.message || "Arama başarısız";
-        console.error(`[SEARCH][${store}]`, r.reason);
-      }
-    });
-  }
-
+function buildSearchResponse(query, results, errors) {
   const products = Object.values(results).flatMap(x => x.products || []);
   const usage = Object.fromEntries(
     Object.entries(results).map(([store, value]) => [
@@ -1073,15 +1063,48 @@ app.get("/api/search", async (req, res) => {
   );
   const totalReefCredits = Object.values(usage).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
   const totalBrightDataRecords = Object.values(usage).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
-
-  res.json({
-    ok: true,
-    query,
-    stores: results,
-    errors,
-    products,
+  return {
+    ok: true, query, stores: results, errors, products,
     usage: { stores: usage, totalReefCredits, totalBrightDataRecords }
+  };
+}
+
+// Progressive endpoint: each store has its own HTTP response, so the browser
+// can render a store immediately instead of waiting for all ten stores.
+app.get("/api/search/store", async (req, res) => {
+  const query = normalizeQuery(req.query.q);
+  const store = String(req.query.store || "").trim().toLowerCase();
+  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
+  if (!SEARCH_STORES.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
+
+  try {
+    const result = await searchWithRetry(store, query);
+    res.json({ ok: true, store, result });
+  } catch (e) {
+    console.error(`[SEARCH][${store}]`, e);
+    res.status(e?.code === "RATE_LIMITED" ? 429 : 502).json({
+      ok: false, store, error: e?.message || "Arama başarısız"
+    });
+  }
+});
+
+// Backward-compatible aggregate endpoint. It now uses the same safe Reef queue.
+app.get("/api/search", async (req, res) => {
+  const query = normalizeQuery(req.query.q);
+  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
+
+  const results = {};
+  const errors = {};
+  const settled = await Promise.allSettled(SEARCH_STORES.map(store => searchWithRetry(store, query)));
+  settled.forEach((r, i) => {
+    const store = SEARCH_STORES[i];
+    if (r.status === "fulfilled") results[store] = r.value;
+    else {
+      errors[store] = r.reason?.message || "Arama başarısız";
+      console.error(`[SEARCH][${store}]`, r.reason);
+    }
   });
+  res.json(buildSearchResponse(query, results, errors));
 });
 
 app.get("/api/push/public-key", (req, res) => {
