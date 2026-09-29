@@ -211,45 +211,54 @@ async function searchProducts(q) {
   showLoading(clean);
   const controller = new AbortController();
   state.controller = controller;
+  state.allProducts = [];
+  state.storeCounts = { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null };
+  renderStoreCounts();
+  render();
 
-  try {
-    const r = await fetch(`/api/search?q=${encodeURIComponent(clean)}`, {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    const j = await r.json().catch(() => ({}));
-    if (myId !== state.requestId) return;
-    if (!r.ok) throw new Error(j.error || "Arama başarısız.");
+  const stores = ["amazon", "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan", "pazarama", "ciceksepeti", "boyner"];
+  const usageStores = {};
+  const errors = [];
 
-    state.allProducts = Array.isArray(j.products) ? j.products : [];
-    state.storeCounts = {
-      trendyol: j.stores?.trendyol?.count ?? 0,
-      hepsiburada: j.stores?.hepsiburada?.count ?? 0,
-      n11: j.stores?.n11?.count ?? 0,
-      mediamarkt: j.stores?.mediamarkt?.count ?? 0,
-      teknosa: j.stores?.teknosa?.count ?? 0,
-      vatan: j.stores?.vatan?.count ?? 0,
-      amazon: j.stores?.amazon?.count ?? 0,
-      pazarama: j.stores?.pazarama?.count ?? 0,
-      ciceksepeti: j.stores?.ciceksepeti?.count ?? 0,
-      boyner: j.stores?.boyner?.count ?? 0
-    };
-    renderStoreCounts();
-    render();
-    renderApiUsage(j.usage);
+  // IMPORTANT: requests are intentionally sequential. This prevents ReefAPI's
+  // short rolling limit from making all non-Amazon stores fail together.
+  for (const store of stores) {
+    if (myId !== state.requestId || controller.signal.aborted) return;
+    try {
+      const r = await fetch(`/api/search/store?store=${encodeURIComponent(store)}&q=${encodeURIComponent(clean)}`, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" }
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `${store} araması başarısız`);
+      const result = j.result || {};
 
-    const errors = Object.values(j.errors || {});
-    if (errors.length === 3) toast("Mağazalardan veri alınamadı. ReefAPI bağlantısını kontrol et.");
-    else if (errors.length) toast("Bazı mağazalar bu aramada yanıt vermedi.");
-  } catch (e) {
-    if (e.name === "AbortError") return;
-    if (myId !== state.requestId) return;
-    state.allProducts = [];
-    renderApiUsage(null);
-    $("#resultCount").textContent = "";
-    $("#grid").innerHTML = `<div class="empty-grid"><div><b>Arama sırasında hata oluştu.</b><br><span>${esc(e.message)}</span></div></div>`;
-  } finally {
-    if (myId === state.requestId) state.controller = null;
+      state.storeCounts[store] = Number(result.count || 0);
+      state.allProducts = state.allProducts.concat(Array.isArray(result.products) ? result.products : []);
+      usageStores[store] = result.usage || { reefCredits: 0, brightDataRecords: 0, cached: Boolean(result.cached) };
+
+      renderStoreCounts();
+      render();
+      const totalReefCredits = Object.values(usageStores).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
+      const totalBrightDataRecords = Object.values(usageStores).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
+      renderApiUsage({ stores: usageStores, totalReefCredits, totalBrightDataRecords });
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      errors.push(`${store}: ${e.message}`);
+      state.storeCounts[store] = 0;
+      renderStoreCounts();
+      render();
+    }
+  }
+
+  if (myId !== state.requestId) return;
+  if (!state.allProducts.length) {
+    renderApiUsage({ stores: usageStores, totalReefCredits: 0, totalBrightDataRecords: 0 });
+    $("#sectionTitle").textContent = `🔎 "${clean}"`;
+    $("#resultCount").textContent = "• sonuç bulunamadı";
+    $("#grid").innerHTML = `<div class="empty-grid"><div><b>Bu aramada ürün bulunamadı.</b><br><span>Mağazaların yanıtlarını ve ReefAPI bağlantısını kontrol et.</span></div></div>`;
+  } else if (errors.length) {
+    toast(`${errors.length} mağaza yanıt vermedi; çalışan mağazaların sonuçları gösteriliyor.`);
   }
 }
 
