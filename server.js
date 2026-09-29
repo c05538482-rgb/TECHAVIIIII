@@ -151,15 +151,16 @@ async function setCache(key, payload, ttlSeconds = CACHE_TTL) {
   `, [key, JSON.stringify(payload), ttlSeconds]);
 }
 
-// ReefAPI uses a shared short rolling request limit. Keep all Reef calls in
-// one small queue so a single search never bursts several marketplace calls
-// at once. Amazon/Bright Data stays independent and can run in parallel.
-let reefQueue = Promise.resolve();
-
+// IMPORTANT PERFORMANCE FIX:
+// Do NOT serialize ReefAPI calls globally. A global queue makes 10 stores
+// wait behind one another, which can turn one search into several minutes.
+// Each upstream request is independently time-limited and stores can run in parallel.
 async function reefRequest(path, body) {
   if (!REEF_API_KEY) throw new Error("REEF_API_KEY Render'da tanımlı değil.");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const isDetail = /\/product\/detail/i.test(String(path));
+  const timeoutMs = isDetail ? 12000 : 18000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(`https://api.reefapi.com${path}`, {
       method: "POST",
@@ -197,9 +198,9 @@ async function reefRequest(path, body) {
 }
 
 async function reef(path, body) {
-  const run = reefQueue.then(() => reefRequest(path, body));
-  reefQueue = run.catch(() => {});
-  return run;
+  // Independent requests are intentionally allowed to run concurrently.
+  // This keeps the UI responsive while preserving the same number of provider calls/credits.
+  return reefRequest(path, body);
 }
 
 function num(v) {
@@ -1044,12 +1045,14 @@ const SEARCH_STORES = [
 ];
 
 async function searchWithRetry(store, query) {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // At most one short retry. Multiple 2.5s retries can make a single store
+  // miss the user's 30-second search expectation.
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await searchStore(store, query);
     } catch (e) {
-      if (e?.code !== "RATE_LIMITED" || attempt === 2) throw e;
-      await new Promise(resolve => setTimeout(resolve, 2500));
+      if (e?.code !== "RATE_LIMITED" || attempt === 1) throw e;
+      await new Promise(resolve => setTimeout(resolve, 700));
     }
   }
 }
@@ -1078,11 +1081,21 @@ app.get("/api/search/store", async (req, res) => {
   if (!SEARCH_STORES.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
 
   try {
-    const result = await searchWithRetry(store, query);
+    // Hard per-store response budget: 28 seconds. One slow marketplace must
+    // never hold the browser hostage beyond the requested 30-second limit.
+    const result = await Promise.race([
+      searchWithRetry(store, query),
+      new Promise((_, reject) => setTimeout(() => {
+        const err = new Error("Mağaza 28 saniye içinde yanıt vermedi.");
+        err.code = "STORE_TIMEOUT";
+        reject(err);
+      }, 28000))
+    ]);
     res.json({ ok: true, store, result });
   } catch (e) {
     console.error(`[SEARCH][${store}]`, e);
-    res.status(e?.code === "RATE_LIMITED" ? 429 : 502).json({
+    const status = e?.code === "RATE_LIMITED" ? 429 : (e?.code === "STORE_TIMEOUT" ? 504 : 502);
+    res.status(status).json({
       ok: false, store, error: e?.message || "Arama başarısız"
     });
   }

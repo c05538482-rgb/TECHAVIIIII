@@ -234,10 +234,18 @@ async function searchProducts(q) {
 
   const runStore = async (store) => {
     try {
+      // Browser-side safety net: no individual store can keep this search
+      // open for more than 29 seconds. Other stores continue independently.
+      const storeController = new AbortController();
+      const onMainAbort = () => storeController.abort();
+      controller.signal.addEventListener("abort", onMainAbort, { once: true });
+      const timeout = setTimeout(() => storeController.abort(), 29000);
       const r = await fetch(`/api/search/store?store=${encodeURIComponent(store)}&q=${encodeURIComponent(clean)}`, {
-        signal: controller.signal,
+        signal: storeController.signal,
         headers: { Accept: "application/json" }
       });
+      clearTimeout(timeout);
+      controller.signal.removeEventListener("abort", onMainAbort);
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "Arama başarısız.");
       if (myId !== state.requestId) return;
@@ -259,7 +267,15 @@ async function searchProducts(q) {
       render();
       renderApiUsage(usage);
     } catch (e) {
-      if (e.name === "AbortError") return;
+      if (e.name === "AbortError") {
+        if (myId === state.requestId && !controller.signal.aborted) {
+          errors[store] = "Mağaza 29 saniyede yanıt vermedi.";
+          state.storeCounts[store] = 0;
+          renderStoreCounts();
+          render();
+        }
+        return;
+      }
       if (myId !== state.requestId) return;
       errors[store] = e.message || "Arama başarısız";
       state.storeCounts[store] = 0;
