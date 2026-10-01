@@ -1,4 +1,4 @@
-﻿require("dotenv").config();
+require("dotenv").config();
 
 const express = require("express");
 const session = require("express-session");
@@ -25,8 +25,8 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails("mailto:alerts@techavi.onrender.com", VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 }
 
-if (!DATABASE_URL) console.warn("[UYARI] DATABASE_URL ayarlÄ± deÄŸil.");
-if (!REEF_API_KEY) console.warn("[UYARI] REEF_API_KEY ayarlÄ± deÄŸil.");
+if (!DATABASE_URL) console.warn("[UYARI] DATABASE_URL ayarlı değil.");
+if (!REEF_API_KEY) console.warn("[UYARI] REEF_API_KEY ayarlı değil.");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -116,8 +116,8 @@ function normalizeQuery(q) {
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
     .replace(/[\\u0300-\\u036f]/g, "")
-    .replace(/Ä±/g, "i")
-    .replace(/[^a-z0-9Ã§ÄŸÄ±Ã¶ÅŸÃ¼Ä±\s-]/gi, " ")
+    .replace(/ı/g, "i")
+    .replace(/[^a-z0-9çğıöşüı\s-]/gi, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120);
@@ -151,10 +151,16 @@ async function setCache(key, payload, ttlSeconds = CACHE_TTL) {
   `, [key, JSON.stringify(payload), ttlSeconds]);
 }
 
-async function reef(path, body) {
-  if (!REEF_API_KEY) throw new Error("REEF_API_KEY Render'da tanÄ±mlÄ± deÄŸil.");
+// IMPORTANT PERFORMANCE FIX:
+// Do NOT serialize ReefAPI calls globally. A global queue makes 10 stores
+// wait behind one another, which can turn one search into several minutes.
+// Each upstream request is independently time-limited and stores can run in parallel.
+async function reefRequest(path, body) {
+  if (!REEF_API_KEY) throw new Error("REEF_API_KEY Render'da tanımlı değil.");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const isDetail = /\/product\/detail/i.test(String(path));
+  const timeoutMs = isDetail ? 12000 : 18000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(`https://api.reefapi.com${path}`, {
       method: "POST",
@@ -167,13 +173,34 @@ async function reef(path, body) {
     });
     const json = await r.json().catch(() => ({}));
     if (!r.ok || json.ok === false) {
+      const code = json?.error?.code || json?.error?.status || r.status;
       const msg = json?.error?.message || json?.error || `ReefAPI HTTP ${r.status}`;
+      if (r.status === 429 || String(code).toUpperCase() === "RATE_LIMITED") {
+        throw Object.assign(new Error(`ReefAPI rate limit: ${String(msg)}`), { code: "RATE_LIMITED", retryable: true });
+      }
       throw new Error(String(msg));
     }
+    const charged = Number(
+      json?.meta?.charged_credits ??
+      json?.meta?.credits_charged ??
+      json?.meta?.credits ??
+      json?.charged_credits ??
+      0
+    );
+    Object.defineProperty(json, "__reefCredits", {
+      value: Number.isFinite(charged) && charged > 0 ? charged : 0,
+      enumerable: false
+    });
     return json;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function reef(path, body) {
+  // Independent requests are intentionally allowed to run concurrently.
+  // This keeps the UI responsive while preserving the same number of provider calls/credits.
+  return reefRequest(path, body);
 }
 
 function num(v) {
@@ -204,7 +231,7 @@ function trendyolNum(v) {
     }
     return null;
   }
-  const s = String(v).replace(/TRY|TL/gi, "").replace(/â‚º/g, "").replace(/\s/g, "").trim();
+  const s = String(v).replace(/TRY|TL/gi, "").replace(/₺/g, "").replace(/\s/g, "").trim();
   if (!s) return null;
   // Trendyol's formatted strings use Turkish notation: 12.999 TL = 12999,
   // while 395,99 TL = 395.99. Never parse a dot-only value as 12.999.
@@ -260,7 +287,7 @@ function extractN11BasketPrice(value, seen = new Set()) {
     .filter(v => typeof v === "string")
     .join(" | ");
   if (/sepet/i.test(campaignText)) {
-    const amountMatches = campaignText.match(/(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{1,2})?\s*(?:TL|â‚º)/gi);
+    const amountMatches = campaignText.match(/(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{1,2})?\s*(?:TL|₺)/gi);
     if (amountMatches?.length) {
       const n = num(amountMatches[amountMatches.length - 1]);
       if (n != null && n > 0) return n;
@@ -301,6 +328,10 @@ async function getN11Detail(x) {
 
     const detail = response?.data?.product || response?.data?.data || response?.data || null;
     if (!detail || typeof detail !== "object") return null;
+    Object.defineProperty(detail, "__reefCredits", {
+      value: Number(response?.__reefCredits || 0),
+      enumerable: false
+    });
 
     const basketPrice = extractN11BasketPrice(detail);
     // Store the resolved shopper price under a private normalized field so the
@@ -322,7 +353,7 @@ async function enrichN11Rows(rows) {
 
   const enriched = new Array(rows.length);
   let next = 0;
-  const workerCount = Math.min(4, rows.length);
+  const workerCount = Math.min(1, rows.length);
 
   async function worker() {
     while (true) {
@@ -336,21 +367,40 @@ async function enrichN11Rows(rows) {
         continue;
       }
 
+      // Only enrich the first 5 n11 rows. This keeps the live basket-price
+      // check useful without spending a ReefAPI detail call on every result.
+      if (index >= 5) {
+        enriched[index] = row;
+        continue;
+      }
+
       const detail = await getN11Detail(row);
-      enriched[index] = detail ? { ...row, ...detail } : row;
+      if (detail) {
+        const detailCredits = Number(detail?.__reefCredits || 0);
+        const merged = { ...row, ...detail };
+        Object.defineProperty(merged, "__reefCredits", {
+          value: detailCredits,
+          enumerable: false
+        });
+        enriched[index] = merged;
+      } else {
+        enriched[index] = row;
+      }
     }
   }
 
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  const detailCredits = enriched.reduce((sum, row) => sum + Number(row?.__reefCredits || 0), 0);
+  Object.defineProperty(enriched, "__reefCredits", { value: detailCredits, enumerable: false });
   return enriched;
 }
 
 
-// Trendyol Plus / SEPETTE fiyatÄ±: search endpoint yalnÄ±zca normal fiyatÄ± dÃ¶ndÃ¼rebilir.
+// Trendyol Plus / SEPETTE fiyatı: search endpoint yalnızca normal fiyatı döndürebilir.
 // IMPORTANT: Trendyol formatted prices must ALWAYS be parsed with trendyolNum.
 // A value such as "12.999 TL" is 12999 TRY, not 12.999. Using the generic
 // num() here caused cards to show values such as 13 TL / 78 TL / 100 TL.
-// product/detail ise TY+ fiyatÄ± ve campaign/campaigns bilgisini saÄŸlar.
+// product/detail ise TY+ fiyatı ve campaign/campaigns bilgisini sağlar.
 function extractTrendyolPlusPrice(value, seen = new Set()) {
   if (value == null) return null;
   if (typeof value !== "object") return null;
@@ -384,7 +434,7 @@ function extractTrendyolPlusPrice(value, seen = new Set()) {
   }
 
   // Campaign text such as:
-  // "Trendyol Plus'a Ã–zel - Sepette 395,99 TL"
+  // "Trendyol Plus'a Özel - Sepette 395,99 TL"
   // Only accept an amount when the SAME text explicitly mentions both
   // Trendyol Plus and Sepette. This prevents unrelated public coupons from
   // changing the normal product price.
@@ -394,7 +444,7 @@ function extractTrendyolPlusPrice(value, seen = new Set()) {
   }
   const text = textParts.join(" | ");
   if (/trendyol\s*plus/i.test(text) && /sepet/i.test(text)) {
-    const afterBasket = text.match(/sepet[^0-9]*(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|â‚º)/i);
+    const afterBasket = text.match(/sepet[^0-9]*(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)/i);
     if (afterBasket) {
       const n = trendyolNum(afterBasket[1]);
       if (n != null && n > 0) return n;
@@ -480,36 +530,83 @@ async function brightDataAmazonSearch(query) {
   const apiKey = process.env.BRIGHTDATA_API_KEY;
   if (!apiKey) throw new Error("BRIGHTDATA_API_KEY eksik");
 
-  const amazonUrl = `https://www.amazon.com.tr/s?k=${encodeURIComponent(query)}`;
-
-  // Bright Data's /scrape endpoint expects an object with an `input` array.
-  const response = await fetch(
-    "https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_l7q7dkf244hwjntr0&format=json&include_errors=true",
+  const trigger = await fetch(
+    "https://api.brightdata.com/datasets/v3/trigger?dataset_id=gd_lwdb4vjm1ehb499uxs&format=json&uncompressed_webhook=true&limit_multiple_results=20",
     {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        input: [{ url: amazonUrl, language: "tr" }]
-      })
+      body: JSON.stringify([{
+        keyword: String(query).trim(),
+        url: "https://www.amazon.com.tr",
+        pages_to_search: 1
+      }])
     }
   );
 
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    const msg = data?.error || data?.message || JSON.stringify(data);
-    throw new Error(`Bright Data Amazon ${response.status}: ${msg}`);
+  const triggerJson = await trigger.json().catch(() => ({}));
+  if (!trigger.ok || !triggerJson.snapshot_id) {
+    throw new Error(String(
+      triggerJson?.error ||
+      triggerJson?.message ||
+      `Bright Data Amazon Search HTTP ${trigger.status}`
+    ));
   }
 
-  return data;
+  const snapshotId = String(triggerJson.snapshot_id);
+  const deadline = Date.now() + 90000;
+
+  while (Date.now() < deadline) {
+    const progress = await fetch(
+      `https://api.brightdata.com/datasets/v3/progress/${encodeURIComponent(snapshotId)}`,
+      {
+        headers: { "Authorization": `Bearer ${apiKey}` }
+      }
+    );
+
+    const progressJson = await progress.json().catch(() => ({}));
+    const status = String(progressJson.status || "running");
+
+    if (["failed", "error", "cancelled"].includes(status)) {
+      throw new Error(`Bright Data Amazon araması ${status} durumunda.`);
+    }
+
+    if (status === "ready") break;
+
+    await new Promise(resolve => setTimeout(resolve, 2500));
+  }
+
+  const progress = await fetch(
+    `https://api.brightdata.com/datasets/v3/progress/${encodeURIComponent(snapshotId)}`,
+    { headers: { "Authorization": `Bearer ${apiKey}` } }
+  );
+  const progressJson = await progress.json().catch(() => ({}));
+
+  if (String(progressJson.status || "") !== "ready") {
+    throw new Error("Amazon araması zaman aşımına uğradı.");
+  }
+
+  const snapshot = await fetch(
+    `https://api.brightdata.com/datasets/v3/snapshot/${encodeURIComponent(snapshotId)}?format=json`,
+    { headers: { "Authorization": `Bearer ${apiKey}` } }
+  );
+
+  const data = await snapshot.json().catch(() => null);
+  if (!snapshot.ok) {
+    throw new Error(String(
+      data?.error ||
+      data?.message ||
+      `Bright Data Amazon sonuç HTTP ${snapshot.status}`
+    ));
+  }
+
+  return Array.isArray(data) ? data : [];
 }
 
-
 function normalizeStoreRow(store, x) {
-  const title = x?.title || x?.name || x?.product_name || "ÃœrÃ¼n";
+  const title = x?.title || x?.name || x?.product_name || "Ürün";
   let price = null;
   let original = null;
   let discount = num(x?.discount_rate ?? x?.discount);
@@ -541,7 +638,7 @@ function normalizeStoreRow(store, x) {
     original = firstNumber(x?.was_price, x?.original_price, x?.list_price);
     discount = num(x?.discount_percent ?? x?.discount);
   } else if (store === "vatan") {
-    // Vatan's `price` is the public online/Web'e Ã–zel shopper price.
+    // Vatan's `price` is the public online/Web'e Özel shopper price.
     // Keep basket_price separate; do not replace the displayed price with a
     // basket-only offer unless the site/API says it is the main price.
     price = firstNumber(x?.price, x?.current_price, x?.sale_price);
@@ -570,6 +667,48 @@ function normalizeStoreRow(store, x) {
   } else if (store === "ciceksepeti") {
     price = firstNumber(x?.price, x?.basket_price);
     original = firstNumber(x?.price_before_discount, x?.price_outside_basket);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "a101") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.basket_offer?.price, x?.final_price);
+    original = firstNumber(x?.price_before_discount, x?.original_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "bim") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.special_price);
+    original = firstNumber(x?.original_price, x?.list_price, x?.price_before_discount);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "carrefoursa") {
+    price = firstNumber(x?.member_price, x?.price, x?.current_price, x?.sale_price);
+    original = firstNumber(x?.price, x?.original_price, x?.list_price);
+    if (price === original) original = firstNumber(x?.price_before_discount, x?.original_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "flo") {
+    price = firstNumber(x?.special_price, x?.price, x?.current_price, x?.sale_price);
+    original = firstNumber(x?.price, x?.original_price, x?.list_price);
+    if (price === original) original = firstNumber(x?.original_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "getir") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.discounted_price);
+    original = firstNumber(x?.original_price, x?.list_price, x?.struck_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "hm") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
+    original = firstNumber(x?.original_price, x?.regular_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "ikea") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
+    original = firstNumber(x?.original_price, x?.lowest_previous_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "migros") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
+    original = firstNumber(x?.original_price, x?.price_before_discount, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "watsons") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price);
+    original = firstNumber(x?.original_price, x?.price_before_discount, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "boyner") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.discounted_price, x?.final_price);
+    original = firstNumber(x?.original_price, x?.list_price, x?.old_price, x?.initial_price);
     discount = num(x?.discount_percent ?? x?.discount);
   } else {
     if (store === "trendyol" && x?.__trendyol_plus_price != null) {
@@ -634,7 +773,18 @@ function normalizeStoreRow(store, x) {
 async function searchStore(store, query) {
   const key = cacheKey(store, query);
   const cached = await getCache(key);
-  if (cached) return { ...cached, cached: true };
+  if (cached) {
+    return {
+      ...cached,
+      cached: true,
+      usage: {
+        provider: store === "amazon" ? "Bright Data" : "ReefAPI",
+        reefCredits: 0,
+        brightDataRecords: 0,
+        cached: true
+      }
+    };
+  }
 
   let response;
   if (store === "trendyol") {
@@ -651,12 +801,32 @@ async function searchStore(store, query) {
     response = await reef("/vatan/v1/search", { query, page: 1 });
   } else if (store === "amazon") {
       response = await brightDataAmazonSearch(query);
-    } else if (store === "pazarama") {
+    } else if (store === "a101") {
+    response = await reef("/a101/v1/search", { query, page: 1, channel: "kapida" });
+  } else if (store === "bim") {
+    response = await reef("/bim/v1/search", { query, page: 1 });
+  } else if (store === "carrefoursa") {
+    response = await reef("/carrefoursa/v1/search", { query, page: 1 });
+  } else if (store === "flo") {
+    response = await reef("/flo/v1/search", { query, page: 1 });
+  } else if (store === "getir") {
+    response = await reef("/getir/v1/search", { query, page: 1, service: "getir" });
+  } else if (store === "hm") {
+    response = await reef("/hm/v1/search", { query, page: 1, country: "tr", language: "tr" });
+  } else if (store === "ikea") {
+    response = await reef("/ikea/v1/search", { query, page: 1, country: "tr", language: "tr" });
+  } else if (store === "migros") {
+    response = await reef("/migros/v1/search", { query, page: 1 });
+  } else if (store === "watsons") {
+    response = await reef("/watsons-tr/v1/search", { query, page: 1 });
+  } else if (store === "pazarama") {
     response = await reef("/pazarama/v1/search", { query, page: 1 });
   } else if (store === "ciceksepeti") {
     response = await reef("/ciceksepeti/v1/search", { query, page: 1 });
+  } else if (store === "boyner") {
+    response = await reef("/boyner/v1/search", { query, page: 1 });
   } else {
-    throw new Error("Desteklenmeyen maÄŸaza");
+    throw new Error("Desteklenmeyen mağaza");
   }
 
   let rows;
@@ -677,35 +847,55 @@ async function searchStore(store, query) {
   // completely untouched.
   if (store === "n11") {
     rows = await enrichN11Rows(rows);
-  } else if (store === "trendyol") {
-    rows = await enrichTrendyolRows(rows);
   }
 
+  const reefCredits = store === "amazon" ? 0 : Number(response?.__reefCredits || 0) + Number(rows?.__reefCredits || 0);
+
+  // Cost optimization: Trendyol search already uses the minimum one page.
+  // Keep only the first 10 live rows for the UI so we do not process/render
+  // unnecessary catalog rows, while preserving the provider's headline count.
+  if (store === "trendyol" && rows.length > 10) rows = rows.slice(0, 10);
+
+  // Amazon Bright Data job is requested with a 20-result limit; keep a hard cap as a safety net.
+  if (store === "amazon" && rows.length > 20) rows = rows.slice(0, 20);
+  const brightDataRecords = store === "amazon" ? rows.length : 0;
+  const rawTotalCount = Number(
+    response?.meta?.total_count ??
+    response?.data?.total_count ??
+    rows.length
+  ) || rows.length;
   const result = {
     store,
-    count: Number(response?.meta?.total_count ?? response?.data?.total_count ?? rows.length) || rows.length,
+    count: store === "trendyol" ? Math.min(rawTotalCount, 10000) : rawTotalCount,
+    rawTotalCount,
     products: rows.map(x => normalizeStoreRow(store, x)),
+    usage: {
+      provider: store === "amazon" ? "Bright Data" : "ReefAPI",
+      reefCredits,
+      brightDataRecords,
+      cached: false
+    },
     fetchedAt: new Date().toISOString()
   };
-  await setCache(key, result);
+  await setCache(key, result, store === "trendyol" ? 60 * 60 : CACHE_TTL);
   return { ...result, cached: false };
 }
 
 function requireAuth(req, res, next) {
-  if (!req.session.userId) return res.status(401).json({ ok: false, error: "GiriÅŸ yapmalÄ±sÄ±n." });
+  if (!req.session.userId) return res.status(401).json({ ok: false, error: "Giriş yapmalısın." });
   next();
 }
 
 
 async function brightDataAmazonTest(amazonUrl) {
   if (!BRIGHTDATA_API_KEY) {
-    throw new Error("Bright Data API anahtarÄ± Render'da bulunamadÄ±.");
+    throw new Error("Bright Data API anahtarı Render'da bulunamadı.");
   }
 
   const u = new URL(amazonUrl);
   const host = u.hostname.toLowerCase();
   if (host !== "amazon.com.tr" && !host.endsWith(".amazon.com.tr")) {
-    throw new Error("Sadece Amazon TÃ¼rkiye baÄŸlantÄ±sÄ± test edilebilir.");
+    throw new Error("Sadece Amazon Türkiye bağlantısı test edilebilir.");
   }
 
   const asinMatch = u.pathname.match(/\/dp\/([A-Z0-9]{10})/i);
@@ -770,7 +960,7 @@ async function brightDataAmazonTest(amazonUrl) {
   const data = await snapshot.json().catch(() => null);
 
   if (!snapshot.ok) {
-    const msg = data?.error || data?.message || `Bright Data sonuÃ§ HTTP ${snapshot.status}`;
+    const msg = data?.error || data?.message || `Bright Data sonuç HTTP ${snapshot.status}`;
     throw new Error(String(msg));
   }
 
@@ -797,7 +987,7 @@ app.get("/brightdata-test", (req, res) => {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TechAvÄ± - Bright Data Test</title>
+<title>TechAvı - Bright Data Test</title>
 <style>
 body{font-family:Arial,sans-serif;background:#0b1020;color:#fff;max-width:850px;margin:40px auto;padding:20px}
 .card{background:#151d35;border:1px solid #2b3658;border-radius:16px;padding:24px}
@@ -810,17 +1000,17 @@ a{color:#8bb8ff}
 <body>
 <div class="card">
 <h1>Bright Data test</h1>
-<p>Bu sayfa sadece test iÃ§indir. TechAvÄ±'nÄ±n ana arama ve alarm sistemi burada deÄŸiÅŸtirilmez.</p>
+<p>Bu sayfa sadece test içindir. TechAvı'nın ana arama ve alarm sistemi burada değiştirilmez.</p>
 <input id="url" value="https://www.amazon.com.tr/dp/B0HJB2BVZ5">
-<button id="run">Amazon Ã¼rÃ¼nÃ¼nÃ¼ test et</button>
-<div id="result">HazÄ±r. Butona bas.</div>
-<p><a href="/">â† TechAvÄ± ana sayfasÄ±na dÃ¶n</a></p>
+<button id="run">Amazon ürününü test et</button>
+<div id="result">Hazır. Butona bas.</div>
+<p><a href="/">← TechAvı ana sayfasına dön</a></p>
 </div>
 <script>
 document.getElementById("run").onclick = async () => {
   const result = document.getElementById("result");
   const url = document.getElementById("url").value.trim();
-  result.textContent = "Bright Data Ã§alÄ±ÅŸÄ±yor, biraz bekle...";
+  result.textContent = "Bright Data çalışıyor, biraz bekle...";
   try {
     const r = await fetch("/api/brightdata/test-amazon?url=" + encodeURIComponent(url));
     const data = await r.json();
@@ -838,13 +1028,13 @@ app.get("/api/brightdata/test-amazon", requireAuth, async (req, res) => {
   try {
     const url = String(req.query.url || "").trim();
     if (!url) {
-      return res.status(400).json({ ok: false, error: "Amazon TÃ¼rkiye Ã¼rÃ¼n baÄŸlantÄ±sÄ± gerekli." });
+      return res.status(400).json({ ok: false, error: "Amazon Türkiye ürün bağlantısı gerekli." });
     }
 
     const result = await brightDataAmazonTest(url);
     res.json({ ok: true, provider: "brightdata", ...result });
   } catch (e) {
-    console.error("Bright Data test hatasÄ±", e.message);
+    console.error("Bright Data test hatası", e.message);
     res.status(400).json({ ok: false, error: e.message });
   }
 });
@@ -866,11 +1056,11 @@ app.post("/api/auth/register", async (req, res) => {
     const password = String(req.body.password || "");
 
     if (!name || !email || password.length < 6) {
-      return res.status(400).json({ ok: false, error: "Ad, geÃ§erli e-posta ve en az 6 karakter ÅŸifre gerekli." });
+      return res.status(400).json({ ok: false, error: "Ad, geçerli e-posta ve en az 6 karakter şifre gerekli." });
     }
 
     const exists = await db("SELECT id FROM users WHERE email=$1", [email]);
-    if (exists.rowCount) return res.status(409).json({ ok: false, error: "Bu e-posta zaten kayÄ±tlÄ±." });
+    if (exists.rowCount) return res.status(409).json({ ok: false, error: "Bu e-posta zaten kayıtlı." });
 
     const hash = await bcrypt.hash(password, 12);
     const r = await db(
@@ -881,7 +1071,7 @@ app.post("/api/auth/register", async (req, res) => {
     res.json({ ok: true, user: r.rows[0] });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ ok: false, error: "KayÄ±t sÄ±rasÄ±nda hata oluÅŸtu." });
+    res.status(500).json({ ok: false, error: "Kayıt sırasında hata oluştu." });
   }
 });
 
@@ -892,12 +1082,12 @@ app.post("/api/auth/login", async (req, res) => {
     const r = await db("SELECT * FROM users WHERE email=$1", [email]);
     const user = r.rows[0];
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      return res.status(401).json({ ok: false, error: "E-posta veya ÅŸifre yanlÄ±ÅŸ." });
+      return res.status(401).json({ ok: false, error: "E-posta veya şifre yanlış." });
     }
     req.session.userId = user.id;
     res.json({ ok: true, user: { id: user.id, name: user.name, email: user.email } });
   } catch (e) {
-    res.status(500).json({ ok: false, error: "GiriÅŸ sÄ±rasÄ±nda hata oluÅŸtu." });
+    res.status(500).json({ ok: false, error: "Giriş sırasında hata oluştu." });
   }
 });
 
@@ -905,77 +1095,99 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+const SEARCH_STORES = [
+  "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
+  "amazon", "pazarama", "ciceksepeti", "boyner",
+  "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"
+];
+
+async function searchWithRetry(store, query) {
+  // At most one short retry. Multiple 2.5s retries can make a single store
+  // miss the user's 30-second search expectation.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await searchStore(store, query);
+    } catch (e) {
+      if (e?.code !== "RATE_LIMITED" || attempt === 1) throw e;
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+  }
+}
+
+function buildSearchResponse(query, results, errors) {
+  const products = Object.values(results).flatMap(x => x.products || []);
+  const usage = Object.fromEntries(
+    Object.entries(results).map(([store, value]) => [
+      store, value.usage || { reefCredits: 0, brightDataRecords: 0, cached: Boolean(value.cached) }
+    ])
+  );
+  const totalReefCredits = Object.values(usage).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
+  const totalBrightDataRecords = Object.values(usage).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
+  return {
+    ok: true, query, stores: results, errors, products,
+    usage: { stores: usage, totalReefCredits, totalBrightDataRecords }
+  };
+}
+
+// Progressive endpoint: each store has its own HTTP response, so the browser
+// can render a store immediately instead of waiting for all ten stores.
+app.get("/api/search/store", async (req, res) => {
+  const query = normalizeQuery(req.query.q);
+  const store = String(req.query.store || "").trim().toLowerCase();
+  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
+  if (!SEARCH_STORES.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
+
+  try {
+    // Hard per-store response budget: 28 seconds. One slow marketplace must
+    // never hold the browser hostage beyond the requested 30-second limit.
+    const result = await Promise.race([
+      searchWithRetry(store, query),
+      new Promise((_, reject) => setTimeout(() => {
+        const err = new Error("Mağaza 28 saniye içinde yanıt vermedi.");
+        err.code = "STORE_TIMEOUT";
+        reject(err);
+      }, 28000))
+    ]);
+    res.json({ ok: true, store, result });
+  } catch (e) {
+    console.error(`[SEARCH][${store}]`, e);
+    const status = e?.code === "RATE_LIMITED" ? 429 : (e?.code === "STORE_TIMEOUT" ? 504 : 502);
+    res.status(status).json({
+      ok: false, store, error: e?.message || "Arama başarısız"
+    });
+  }
+});
+
+// Backward-compatible aggregate endpoint. It now uses the same safe Reef queue.
 app.get("/api/search", async (req, res) => {
   const query = normalizeQuery(req.query.q);
   if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
 
-  const stores = ["trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan", "amazon", "pazarama", "ciceksepeti"];
-  const settled = await Promise.allSettled(stores.map(s => searchStore(s, query)));
   const results = {};
   const errors = {};
-
+  const settled = await Promise.allSettled(SEARCH_STORES.map(store => searchWithRetry(store, query)));
   settled.forEach((r, i) => {
-    const store = stores[i];
+    const store = SEARCH_STORES[i];
     if (r.status === "fulfilled") results[store] = r.value;
-    else errors[store] = r.reason?.message || "Arama baÅŸarÄ±sÄ±z";
-  });
-
-  const products = Object.values(results).flatMap(x => x.products);
-  res.json({
-    ok: true,
-    query,
-    stores: results,
-    errors,
-    products
-  });
-});
-
-app.get("/api/search-stream", async (req, res) => {
-  const query = normalizeQuery(req.query.q);
-  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
-
-  const stores = ["trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan", "amazon", "pazarama", "ciceksepeti"];
-
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  if (res.flushHeaders) res.flushHeaders();
-
-  const send = (event, payload) => {
-    if (res.writableEnded) return;
-    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
-  };
-
-  let closed = false;
-  req.on("close", () => { closed = true; });
-
-  const jobs = stores.map(async (store) => {
-    try {
-      const result = await searchStore(store, query);
-      if (!closed) send("store", { store, result });
-    } catch (e) {
-      if (!closed) send("store", { store, error: e?.message || "Arama baÅŸarÄ±sÄ±z" });
+    else {
+      errors[store] = r.reason?.message || "Arama başarısız";
+      console.error(`[SEARCH][${store}]`, r.reason);
     }
   });
-
-  await Promise.allSettled(jobs);
-
-  if (!closed) {
-    send("done", { ok: true, query });
-    res.end();
-  }
+  res.json(buildSearchResponse(query, results, errors));
 });
+
 app.get("/api/push/public-key", (req, res) => {
   res.json({ ok: Boolean(VAPID_PUBLIC_KEY), publicKey: VAPID_PUBLIC_KEY || null });
 });
 
 app.post("/api/push/subscribe", requireAuth, async (req, res) => {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-    return res.status(503).json({ ok: false, error: "Push bildirimleri henÃ¼z yapÄ±landÄ±rÄ±lmadÄ±." });
+    return res.status(503).json({ ok: false, error: "Push bildirimleri henüz yapılandırılmadı." });
   }
   const sub = req.body?.subscription;
   if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
-    return res.status(400).json({ ok: false, error: "GeÃ§ersiz bildirim aboneliÄŸi." });
+    return res.status(400).json({ ok: false, error: "Geçersiz bildirim aboneliği." });
   }
   await db(`
     INSERT INTO push_subscriptions(user_id,endpoint,subscription,last_used_at)
@@ -1002,17 +1214,17 @@ async function sendPushToUser(userId, payload) {
       if (e.statusCode === 404 || e.statusCode === 410) {
         await db("DELETE FROM push_subscriptions WHERE id=$1", [row.id]);
       } else {
-        console.warn("Push gÃ¶nderim hatasÄ±", row.id, e.message);
+        console.warn("Push gönderim hatası", row.id, e.message);
       }
     }
   }
 }
 
 app.post("/api/push/test", requireAuth, async (req, res) => {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return res.status(503).json({ ok:false, error:"Push bildirimleri yapÄ±landÄ±rÄ±lmadÄ±." });
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return res.status(503).json({ ok:false, error:"Push bildirimleri yapılandırılmadı." });
   await sendPushToUser(req.session.userId, {
-    title: "ğŸ”” TechAvÄ± bildirimleri aktif",
-    body: "Fiyat alarmÄ±n tetiklendiÄŸinde telefonuna bildirim gÃ¶ndereceÄŸiz.",
+    title: "🔔 TechAvı bildirimleri aktif",
+    body: "Fiyat alarmın tetiklendiğinde telefonuna bildirim göndereceğiz.",
     url: APP_URL
   });
   res.json({ ok:true });
@@ -1036,9 +1248,11 @@ app.post("/api/alarms", requireAuth, async (req, res) => {
     "Vatan": "vatan",
     "Vatan Bilgisayar": "vatan",
     "Amazon": "amazon",
-    "Amazon TÃ¼rkiye": "amazon",
+    "Amazon Türkiye": "amazon",
     "Pazarama": "pazarama",
-    "Ã‡iÃ§eksepeti": "ciceksepeti"
+    "Çiçeksepeti": "ciceksepeti",
+    "Boyner": "boyner",
+    "Morhipo": "boyner"
   };
   const rawStore = String(req.body.store || "").trim();
   const store = storeAliases[rawStore] || rawStore.toLowerCase();
@@ -1047,8 +1261,8 @@ app.post("/api/alarms", requireAuth, async (req, res) => {
   const productId = String(req.body.productId || "").trim();
   const target = num(req.body.targetPrice);
 
-  if (!["trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan", "amazon", "pazarama", "ciceksepeti"].includes(store) || !title || !target || target <= 0) {
-    return res.status(400).json({ ok: false, error: "MaÄŸaza, Ã¼rÃ¼n ve geÃ§erli hedef fiyat gerekli." });
+  if (!["trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan", "amazon", "pazarama", "ciceksepeti", "boyner"].includes(store) || !title || !target || target <= 0) {
+    return res.status(400).json({ ok: false, error: "Mağaza, ürün ve geçerli hedef fiyat gerekli." });
   }
 
   const r = await db(`
@@ -1105,35 +1319,35 @@ async function checkAlarms() {
 
           const user = await db("SELECT name,email FROM users WHERE id=$1", [alarm.user_id]);
           await sendPushToUser(alarm.user_id, {
-            title: "ğŸ”” TechAvÄ± â€” fiyat dÃ¼ÅŸtÃ¼!",
-            body: `${alarm.title} â€” ${Number(price).toLocaleString("tr-TR")} TL`,
+            title: "🔔 TechAvı — fiyat düştü!",
+            body: `${alarm.title} — ${Number(price).toLocaleString("tr-TR")} TL`,
             url: alarm.url || APP_URL,
             store: alarm.store
           });
           if (resend && user.rows[0]?.email) {
-            const from = process.env.RESEND_FROM || "TechAvÄ± <onboarding@resend.dev>";
+            const from = process.env.RESEND_FROM || "TechAvı <onboarding@resend.dev>";
             await resend.emails.send({
               from,
               to: [user.rows[0].email],
-              subject: `ğŸ”” TechAvÄ± fiyat alarmÄ±: ${alarm.title}`,
+              subject: `🔔 TechAvı fiyat alarmı: ${alarm.title}`,
               html: `
                 <div style="font-family:Arial,sans-serif">
-                  <h2>ğŸ”” Fiyat alarmÄ± tetiklendi</h2>
+                  <h2>🔔 Fiyat alarmı tetiklendi</h2>
                   <p>${escapeHtml(alarm.title)}</p>
-                  <p>GÃ¼ncel fiyat: <b>${Number(price).toLocaleString("tr-TR")} TL</b></p>
+                  <p>Güncel fiyat: <b>${Number(price).toLocaleString("tr-TR")} TL</b></p>
                   <p>Hedef fiyat: <b>${Number(alarm.target_price).toLocaleString("tr-TR")} TL</b></p>
-                  ${alarm.url ? `<p><a href="${escapeAttr(alarm.url)}">ÃœrÃ¼nÃ¼ aÃ§</a></p>` : ""}
+                  ${alarm.url ? `<p><a href="${escapeAttr(alarm.url)}">Ürünü aç</a></p>` : ""}
                 </div>
               `
             });
           }
         }
       } catch (e) {
-        console.error("Alarm kontrol hatasÄ±", alarm.id, e.message);
+        console.error("Alarm kontrol hatası", alarm.id, e.message);
       }
     }
   } catch (e) {
-    console.error("Alarm job hatasÄ±", e.message);
+    console.error("Alarm job hatası", e.message);
   }
 }
 
@@ -1180,11 +1394,10 @@ app.use((req, res) => {
     await initDb();
     setInterval(checkAlarms, ALARM_INTERVAL * 60 * 1000);
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`TechAvÄ± V2 Ã§alÄ±ÅŸÄ±yor: http://0.0.0.0:${PORT}`);
+      console.log(`TechAvı V2 çalışıyor: http://0.0.0.0:${PORT}`);
     });
   } catch (e) {
-    console.error("BaÅŸlatma hatasÄ±:", e);
+    console.error("Başlatma hatası:", e);
     process.exit(1);
   }
 })();
-

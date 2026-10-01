@@ -11,7 +11,7 @@ const state = {
   searchTimer: null,
   controller: null,
   requestId: 0,
-  storeCounts: { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null },
+  storeCounts: { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null, a101:null, bim:null, carrefoursa:null, flo:null, getir:null, hm:null, ikea:null, migros:null, watsons:null },
   favorites: new Set(JSON.parse(localStorage.getItem("techavi_favs") || "[]"))
 };
 
@@ -63,22 +63,9 @@ function storeName(s) {
     amazon:"Amazon Türkiye",
     pazarama:"Pazarama",
     ciceksepeti:"Çiçeksepeti",
-    boyner:"Boyner"
+    boyner:"Boyner",
+    a101:"A-101", bim:"BİM", carrefoursa:"CarrefourSA", flo:"FLO", getir:"Getir", hm:"H&M", ikea:"IKEA", migros:"Migros Sanalmarket", watsons:"Watsons Türkiye"
   }[String(s).toLowerCase()] || s || "Mağaza");
-}
-function storeKey(s) {
-  const x = String(s || "").toLowerCase().trim();
-  if (x.includes("trendyol")) return "trendyol";
-  if (x.includes("hepsiburada")) return "hepsiburada";
-  if (x === "n11" || x.includes("n11")) return "n11";
-  if (x.includes("mediamarkt")) return "mediamarkt";
-  if (x.includes("teknosa")) return "teknosa";
-  if (x.includes("vatan")) return "vatan";
-  if (x.includes("amazon")) return "amazon";
-  if (x.includes("pazarama")) return "pazarama";
-  if (x.includes("ciceksepeti") || x.includes("çiçeksepeti")) return "ciceksepeti";
-  if (x.includes("boyner") || x.includes("morhipo")) return "boyner";
-  return x;
 }
 function storeKey(s) {
   const x = String(s || "").toLowerCase();
@@ -92,6 +79,15 @@ function storeKey(s) {
   if (x.includes("pazarama")) return "pazarama";
   if (x.includes("ciceksepeti") || x.includes("çiçeksepeti")) return "ciceksepeti";
   if (x.includes("boyner") || x.includes("morhipo")) return "boyner";
+  if (x.includes("a101")) return "a101";
+  if (x === "bim" || x.includes("bim")) return "bim";
+  if (x.includes("carrefoursa")) return "carrefoursa";
+  if (x.includes("flo")) return "flo";
+  if (x.includes("getir")) return "getir";
+  if (x === "h&m" || x.includes("h&m") || x.includes("hm")) return "hm";
+  if (x.includes("ikea")) return "ikea";
+  if (x.includes("migros")) return "migros";
+  if (x.includes("watsons")) return "watsons";
   return x;
 }
 
@@ -118,7 +114,7 @@ function renderCard(p) {
 }
 
 function renderStoreCounts() {
-  for (const key of ["trendyol", "hepsiburada", "n11", "amazon", "mediamarkt", "teknosa", "vatan", "pazarama", "ciceksepeti", "boyner"]) {
+  for (const key of ["trendyol", "hepsiburada", "n11", "amazon", "mediamarkt", "teknosa", "vatan", "pazarama", "ciceksepeti", "boyner", "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"]) {
     const value = state.storeCounts[key];
     $(`#count-${key}`).textContent = value == null ? "Arama bekleniyor" : `${Number(value).toLocaleString("tr-TR")} ürün bulundu`;
   }
@@ -188,7 +184,7 @@ function showLoading(q) {
   renderApiUsage(null);
   $("#sectionTitle").textContent = `🔎 "${q}" aranıyor`;
   $("#resultCount").textContent = "• mağazalar kontrol ediliyor...";
-  $("#grid").innerHTML = `<div class="loading-grid"><div class="loading-spinner"></div><span>Trendyol, Hepsiburada, n11, MediaMarkt, Teknosa, Vatan, Amazon, Pazarama, Çiçeksepeti ve Boyner aranıyor…</span></div>`;
+  $("#grid").innerHTML = `<div class="loading-grid"><div class="loading-spinner"></div><span>Trendyol, Hepsiburada, n11, MediaMarkt, Teknosa, Vatan, Amazon, Pazarama, Çiçeksepeti, Boyner ve yeni mağazalar aranıyor…</span></div>`;
 }
 
 async function searchProducts(q) {
@@ -202,7 +198,7 @@ async function searchProducts(q) {
   const emptyCounts = {
     trendyol: null, hepsiburada: null, n11: null, mediamarkt: null,
     teknosa: null, vatan: null, amazon: null, pazarama: null,
-    ciceksepeti: null, boyner: null
+    ciceksepeti: null, boyner: null, a101:null, bim:null, carrefoursa:null, flo:null, getir:null, hm:null, ikea:null, migros:null, watsons:null
   };
 
   if (clean.length < 2) {
@@ -221,7 +217,8 @@ async function searchProducts(q) {
   // store finishes; no extra provider calls are made.
   const stores = [
     "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa",
-    "vatan", "amazon", "pazarama", "ciceksepeti", "boyner"
+    "vatan", "amazon", "pazarama", "ciceksepeti", "boyner",
+    "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"
   ];
   const results = {};
   const errors = {};
@@ -478,9 +475,15 @@ function setStoreFilter(key) {
   render();
 }
 
+let deferredInstallPrompt = null;
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstallPrompt=e; const b=$("#installBtn"); if(b) b.classList.remove("hidden"); });
+window.addEventListener("appinstalled", () => { deferredInstallPrompt=null; const b=$("#installBtn"); if(b) b.classList.add("hidden"); toast("TechAvı uygulaması kuruldu."); });
+function setupInstallButton(){ const b=$("#installBtn"); if(!b)return; b.onclick=async()=>{ if(deferredInstallPrompt){ deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice; deferredInstallPrompt=null; b.classList.add("hidden"); } else toast("Tarayıcı menüsünden 'Uygulamayı yükle' seçeneğini kullanabilirsin."); }; }
+
 function init() {
   updateCounts();
   renderStoreCounts();
+  setupInstallButton();
   loadMe();
   setupSuggestions();
 

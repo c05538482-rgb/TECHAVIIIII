@@ -668,6 +668,44 @@ function normalizeStoreRow(store, x) {
     price = firstNumber(x?.price, x?.basket_price);
     original = firstNumber(x?.price_before_discount, x?.price_outside_basket);
     discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "a101") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.basket_offer?.price, x?.final_price);
+    original = firstNumber(x?.price_before_discount, x?.original_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "bim") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.special_price);
+    original = firstNumber(x?.original_price, x?.list_price, x?.price_before_discount);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "carrefoursa") {
+    price = firstNumber(x?.member_price, x?.price, x?.current_price, x?.sale_price);
+    original = firstNumber(x?.price, x?.original_price, x?.list_price);
+    if (price === original) original = firstNumber(x?.price_before_discount, x?.original_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "flo") {
+    price = firstNumber(x?.special_price, x?.price, x?.current_price, x?.sale_price);
+    original = firstNumber(x?.price, x?.original_price, x?.list_price);
+    if (price === original) original = firstNumber(x?.original_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "getir") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.discounted_price);
+    original = firstNumber(x?.original_price, x?.list_price, x?.struck_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "hm") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
+    original = firstNumber(x?.original_price, x?.regular_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "ikea") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
+    original = firstNumber(x?.original_price, x?.lowest_previous_price, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "migros") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
+    original = firstNumber(x?.original_price, x?.price_before_discount, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
+  } else if (store === "watsons") {
+    price = firstNumber(x?.price, x?.current_price, x?.sale_price);
+    original = firstNumber(x?.original_price, x?.price_before_discount, x?.list_price);
+    discount = num(x?.discount_percent ?? x?.discount);
   } else if (store === "boyner") {
     price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.discounted_price, x?.final_price);
     original = firstNumber(x?.original_price, x?.list_price, x?.old_price, x?.initial_price);
@@ -763,7 +801,25 @@ async function searchStore(store, query) {
     response = await reef("/vatan/v1/search", { query, page: 1 });
   } else if (store === "amazon") {
       response = await brightDataAmazonSearch(query);
-    } else if (store === "pazarama") {
+    } else if (store === "a101") {
+    response = await reef("/a101/v1/search", { query, page: 1, channel: "kapida" });
+  } else if (store === "bim") {
+    response = await reef("/bim/v1/search", { query, page: 1 });
+  } else if (store === "carrefoursa") {
+    response = await reef("/carrefoursa/v1/search", { query, page: 1 });
+  } else if (store === "flo") {
+    response = await reef("/flo/v1/search", { query, page: 1 });
+  } else if (store === "getir") {
+    response = await reef("/getir/v1/search", { query, page: 1, service: "getir" });
+  } else if (store === "hm") {
+    response = await reef("/hm/v1/search", { query, page: 1, country: "tr", language: "tr" });
+  } else if (store === "ikea") {
+    response = await reef("/ikea/v1/search", { query, page: 1, country: "tr", language: "tr" });
+  } else if (store === "migros") {
+    response = await reef("/migros/v1/search", { query, page: 1 });
+  } else if (store === "watsons") {
+    response = await reef("/watsons-tr/v1/search", { query, page: 1 });
+  } else if (store === "pazarama") {
     response = await reef("/pazarama/v1/search", { query, page: 1 });
   } else if (store === "ciceksepeti") {
     response = await reef("/ciceksepeti/v1/search", { query, page: 1 });
@@ -1041,7 +1097,8 @@ app.post("/api/auth/logout", (req, res) => {
 
 const SEARCH_STORES = [
   "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
-  "amazon", "pazarama", "ciceksepeti", "boyner"
+  "amazon", "pazarama", "ciceksepeti", "boyner",
+  "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"
 ];
 
 async function searchWithRetry(store, query) {
