@@ -151,16 +151,10 @@ async function setCache(key, payload, ttlSeconds = CACHE_TTL) {
   `, [key, JSON.stringify(payload), ttlSeconds]);
 }
 
-// IMPORTANT PERFORMANCE FIX:
-// Do NOT serialize ReefAPI calls globally. A global queue makes 10 stores
-// wait behind one another, which can turn one search into several minutes.
-// Each upstream request is independently time-limited and stores can run in parallel.
-async function reefRequest(path, body) {
+async function reef(path, body) {
   if (!REEF_API_KEY) throw new Error("REEF_API_KEY Render'da tanımlı değil.");
   const controller = new AbortController();
-  const isDetail = /\/product\/detail/i.test(String(path));
-  const timeoutMs = isDetail ? 12000 : 18000;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), 25000);
   try {
     const r = await fetch(`https://api.reefapi.com${path}`, {
       method: "POST",
@@ -195,12 +189,6 @@ async function reefRequest(path, body) {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-async function reef(path, body) {
-  // Independent requests are intentionally allowed to run concurrently.
-  // This keeps the UI responsive while preserving the same number of provider calls/credits.
-  return reefRequest(path, body);
 }
 
 function num(v) {
@@ -367,9 +355,11 @@ async function enrichN11Rows(rows) {
         continue;
       }
 
-      // Only enrich the first 5 n11 rows. This keeps the live basket-price
-      // check useful without spending a ReefAPI detail call on every result.
-      if (index >= 5) {
+      // Only enrich the first 2 n11 rows. This keeps the live basket-price
+      // check useful while cutting the n11 detail calls from 5 to 2.
+      // Each n11 detail call costs ReefAPI credits, so the normal n11
+      // search should now be roughly 6 credits instead of 12.
+      if (index >= 2) {
         enriched[index] = row;
         continue;
       }
@@ -668,44 +658,6 @@ function normalizeStoreRow(store, x) {
     price = firstNumber(x?.price, x?.basket_price);
     original = firstNumber(x?.price_before_discount, x?.price_outside_basket);
     discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "a101") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.basket_offer?.price, x?.final_price);
-    original = firstNumber(x?.price_before_discount, x?.original_price, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "bim") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.special_price);
-    original = firstNumber(x?.original_price, x?.list_price, x?.price_before_discount);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "carrefoursa") {
-    price = firstNumber(x?.member_price, x?.price, x?.current_price, x?.sale_price);
-    original = firstNumber(x?.price, x?.original_price, x?.list_price);
-    if (price === original) original = firstNumber(x?.price_before_discount, x?.original_price, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "flo") {
-    price = firstNumber(x?.special_price, x?.price, x?.current_price, x?.sale_price);
-    original = firstNumber(x?.price, x?.original_price, x?.list_price);
-    if (price === original) original = firstNumber(x?.original_price, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "getir") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.discounted_price);
-    original = firstNumber(x?.original_price, x?.list_price, x?.struck_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "hm") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
-    original = firstNumber(x?.original_price, x?.regular_price, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "ikea") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
-    original = firstNumber(x?.original_price, x?.lowest_previous_price, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "migros") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.member_price);
-    original = firstNumber(x?.original_price, x?.price_before_discount, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
-  } else if (store === "watsons") {
-    price = firstNumber(x?.price, x?.current_price, x?.sale_price);
-    original = firstNumber(x?.original_price, x?.price_before_discount, x?.list_price);
-    discount = num(x?.discount_percent ?? x?.discount);
   } else if (store === "boyner") {
     price = firstNumber(x?.price, x?.current_price, x?.sale_price, x?.discounted_price, x?.final_price);
     original = firstNumber(x?.original_price, x?.list_price, x?.old_price, x?.initial_price);
@@ -801,25 +753,7 @@ async function searchStore(store, query) {
     response = await reef("/vatan/v1/search", { query, page: 1 });
   } else if (store === "amazon") {
       response = await brightDataAmazonSearch(query);
-    } else if (store === "a101") {
-    response = await reef("/a101/v1/search", { query, page: 1, channel: "kapida" });
-  } else if (store === "bim") {
-    response = await reef("/bim/v1/search", { query, page: 1 });
-  } else if (store === "carrefoursa") {
-    response = await reef("/carrefoursa/v1/search", { query, page: 1 });
-  } else if (store === "flo") {
-    response = await reef("/flo/v1/search", { query, page: 1 });
-  } else if (store === "getir") {
-    response = await reef("/getir/v1/search", { query, page: 1, service: "getir" });
-  } else if (store === "hm") {
-    response = await reef("/hm/v1/search", { query, page: 1, country: "tr", language: "tr" });
-  } else if (store === "ikea") {
-    response = await reef("/ikea/v1/search", { query, page: 1, country: "tr", language: "tr" });
-  } else if (store === "migros") {
-    response = await reef("/migros/v1/search", { query, page: 1 });
-  } else if (store === "watsons") {
-    response = await reef("/watsons-tr/v1/search", { query, page: 1 });
-  } else if (store === "pazarama") {
+    } else if (store === "pazarama") {
     response = await reef("/pazarama/v1/search", { query, page: 1 });
   } else if (store === "ciceksepeti") {
     response = await reef("/ciceksepeti/v1/search", { query, page: 1 });
@@ -1095,26 +1029,44 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-const SEARCH_STORES = [
-  "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
-  "amazon", "pazarama", "ciceksepeti", "boyner",
-  "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"
-];
+app.get("/api/search", async (req, res) => {
+  const query = normalizeQuery(req.query.q);
+  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
 
-async function searchWithRetry(store, query) {
-  // At most one short retry. Multiple 2.5s retries can make a single store
-  // miss the user's 30-second search expectation.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      return await searchStore(store, query);
-    } catch (e) {
-      if (e?.code !== "RATE_LIMITED" || attempt === 1) throw e;
-      await new Promise(resolve => setTimeout(resolve, 700));
+  const stores = [
+    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
+    "amazon", "pazarama", "ciceksepeti", "boyner"
+  ];
+  const results = {};
+  const errors = {};
+
+  async function searchWithRetry(store) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await searchStore(store, query);
+      } catch (e) {
+        if (e?.code !== "RATE_LIMITED" || attempt === 2) throw e;
+        await new Promise(resolve => setTimeout(resolve, 2200));
+      }
     }
   }
-}
 
-function buildSearchResponse(query, results, errors) {
+  // ReefAPI is deliberately kept below its short rolling request limit.
+  // Two stores at a time is slower than a burst, but prevents one search from
+  // making every other store fail with RATE_LIMITED. Amazon remains independent.
+  for (let i = 0; i < stores.length; i += 2) {
+    const batch = stores.slice(i, i + 2);
+    const settled = await Promise.allSettled(batch.map(store => searchWithRetry(store)));
+    settled.forEach((r, idx) => {
+      const store = batch[idx];
+      if (r.status === "fulfilled") results[store] = r.value;
+      else {
+        errors[store] = r.reason?.message || "Arama başarısız";
+        console.error(`[SEARCH][${store}]`, r.reason);
+      }
+    });
+  }
+
   const products = Object.values(results).flatMap(x => x.products || []);
   const usage = Object.fromEntries(
     Object.entries(results).map(([store, value]) => [
@@ -1123,58 +1075,15 @@ function buildSearchResponse(query, results, errors) {
   );
   const totalReefCredits = Object.values(usage).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
   const totalBrightDataRecords = Object.values(usage).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
-  return {
-    ok: true, query, stores: results, errors, products,
+
+  res.json({
+    ok: true,
+    query,
+    stores: results,
+    errors,
+    products,
     usage: { stores: usage, totalReefCredits, totalBrightDataRecords }
-  };
-}
-
-// Progressive endpoint: each store has its own HTTP response, so the browser
-// can render a store immediately instead of waiting for all ten stores.
-app.get("/api/search/store", async (req, res) => {
-  const query = normalizeQuery(req.query.q);
-  const store = String(req.query.store || "").trim().toLowerCase();
-  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
-  if (!SEARCH_STORES.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
-
-  try {
-    // Hard per-store response budget: 28 seconds. One slow marketplace must
-    // never hold the browser hostage beyond the requested 30-second limit.
-    const result = await Promise.race([
-      searchWithRetry(store, query),
-      new Promise((_, reject) => setTimeout(() => {
-        const err = new Error("Mağaza 28 saniye içinde yanıt vermedi.");
-        err.code = "STORE_TIMEOUT";
-        reject(err);
-      }, 28000))
-    ]);
-    res.json({ ok: true, store, result });
-  } catch (e) {
-    console.error(`[SEARCH][${store}]`, e);
-    const status = e?.code === "RATE_LIMITED" ? 429 : (e?.code === "STORE_TIMEOUT" ? 504 : 502);
-    res.status(status).json({
-      ok: false, store, error: e?.message || "Arama başarısız"
-    });
-  }
-});
-
-// Backward-compatible aggregate endpoint. It now uses the same safe Reef queue.
-app.get("/api/search", async (req, res) => {
-  const query = normalizeQuery(req.query.q);
-  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
-
-  const results = {};
-  const errors = {};
-  const settled = await Promise.allSettled(SEARCH_STORES.map(store => searchWithRetry(store, query)));
-  settled.forEach((r, i) => {
-    const store = SEARCH_STORES[i];
-    if (r.status === "fulfilled") results[store] = r.value;
-    else {
-      errors[store] = r.reason?.message || "Arama başarısız";
-      console.error(`[SEARCH][${store}]`, r.reason);
-    }
   });
-  res.json(buildSearchResponse(query, results, errors));
 });
 
 app.get("/api/push/public-key", (req, res) => {

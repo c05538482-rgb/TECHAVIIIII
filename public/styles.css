@@ -103,7 +103,3 @@ body.modal-open{overflow:hidden}
 .api-usage-items span { padding: 6px 9px; border-radius: 9px; background: rgba(255,255,255,.055); }
 .api-usage-total { margin-top: 8px; opacity: .82; }
 .api-usage.hidden { display: none; }
-
-.store-dot.a101{color:#e30613;background:#e30613}.store-dot.bim{color:#e30613;background:#e30613}.store-dot.carrefoursa{color:#ef3340;background:#ef3340}.store-dot.flo{color:#e30613;background:#e30613}.store-dot.getir{color:#ffd21f;background:#ffd21f}.store-dot.hm{color:#e50010;background:#e50010}.store-dot.ikea{color:#0051ba;background:#0051ba}.store-dot.migros{color:#ff6b00;background:#ff6b00}.store-dot.watsons{color:#ee2a7b;background:#ee2a7b}
-@media(max-width:700px){.store-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:480px){.store-cards{grid-template-columns:1fr}}
