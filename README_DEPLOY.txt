@@ -23,9 +23,3 @@ Düzeltmeler:
 - Trendyol / Hepsiburada / n11 fiyat hesaplama mantığına dokunulmadı.
 
 VAPID private key'i GitHub'a koymayın.
-
-
-n11 KREDI OPTIMIZASYONU
-- n11 arama sonucunun yalnızca ilk 2 ürünü detay/SEPETTE fiyatı için zenginleştirilir.
-- Böylece n11 detay çağrıları 5'ten 2'ye düşürülür.
-- Arama sonucu ve diğer mağazaların ReefAPI kullanımı değiştirilmez.

@@ -367,9 +367,9 @@ async function enrichN11Rows(rows) {
         continue;
       }
 
-      // Only enrich the first 5 n11 rows. This keeps the live basket-price
-      // check useful without spending a ReefAPI detail call on every result.
-      if (index >= 5) {
+      // Only enrich the first n11 row. This keeps one live basket-price
+      // check while avoiding the 5 detail calls that were consuming extra credits.
+      if (index >= 1) {
         enriched[index] = row;
         continue;
       }
