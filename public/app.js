@@ -8,6 +8,7 @@ const state = {
   selected: null,
   query: "",
   activeStore: "all",
+  viewMode: "all",
   searchTimer: null,
   controller: null,
   requestId: 0,
@@ -120,15 +121,33 @@ function renderStoreCounts() {
   }
 }
 
+function getDiscountPercent(p) {
+  const price = Number(p.price);
+  const original = Number(p.originalPrice);
+  if (!Number.isFinite(price) || !Number.isFinite(original) || original <= price || original <= 0) return 0;
+  return Math.round((1 - price / original) * 100);
+}
+
+function applyViewMode(items) {
+  const list = items.slice();
+  if (state.viewMode === "deals") return list.filter(p => getDiscountPercent(p) >= 10).sort((a,b) => getDiscountPercent(b) - getDiscountPercent(a));
+  if (state.viewMode === "drops") return list.filter(p => getDiscountPercent(p) > 0).sort((a,b) => getDiscountPercent(b) - getDiscountPercent(a));
+  if (state.viewMode === "lowest") return list.filter(p => Number.isFinite(Number(p.price)) && Number(p.price) > 0).sort((a,b) => Number(a.price) - Number(b.price));
+  return list;
+}
+
 function render() {
   let items = state.allProducts.slice();
   if (state.activeStore !== "all") items = items.filter(p => storeKey(p.store) === state.activeStore);
+  items = applyViewMode(items);
 
+  const viewTitles = { all: "🔎", deals: "🔥 Fırsatlar", drops: "📉 Fiyat Düşüşleri", lowest: "🏆 Dip Fiyatlar" };
   $("#resultCount").textContent = state.query ? `• ${items.length} gösterilen ürün` : "";
-  $("#sectionTitle").textContent = state.query ? `🔎 "${state.query}" sonuçları` : "🔎 Ürün ara";
+  $("#sectionTitle").textContent = state.query ? `${viewTitles[state.viewMode] || "🔎"} "${state.query}"` : "🔎 Ürün ara";
 
   if (!state.query) {
-    $("#grid").innerHTML = `<div class="empty-grid"><div><div style="font-size:38px;margin-bottom:10px">⌕</div><b>Bir ürün ara</b><br><span>Örneğin: RTX 5070, LEGO Technic Supra MK4 veya ASUS TUF</span></div></div>`;
+    const labels = { deals: "Fırsatları görmek için önce bir ürün ara.", drops: "Fiyat düşüşlerini görmek için önce bir ürün ara.", lowest: "Dip fiyatları görmek için önce bir ürün ara." };
+    $("#grid").innerHTML = `<div class="empty-grid"><div><div style="font-size:38px;margin-bottom:10px">⌕</div><b>${labels[state.viewMode] || "Bir ürün ara"}</b><br><span>Örneğin: RTX 5070, LEGO Technic Supra MK4 veya ASUS TUF</span></div></div>`;
     return;
   }
 
@@ -194,6 +213,7 @@ async function searchProducts(q) {
 
   if (state.controller) state.controller.abort();
   const myId = ++state.requestId;
+  state.viewMode = "all";
 
   const emptyCounts = {
     trendyol: null, hepsiburada: null, n11: null, mediamarkt: null,
@@ -472,6 +492,13 @@ function showFavorites() {
 function setStoreFilter(key) {
   state.activeStore = state.activeStore === key ? "all" : key;
   $$(".store-card").forEach(b => b.classList.toggle("active", b.dataset.store === state.activeStore));
+  render();
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode;
+  $$('[data-page]').forEach(b => b.classList.toggle('nav-active', b.dataset.page === mode || (mode === 'all' && b.dataset.page === 'home')));
+  document.body.classList.toggle('deal-view-active', mode !== 'all');
   render();
 }
 
