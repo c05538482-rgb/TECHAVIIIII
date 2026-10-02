@@ -1,0 +1,14 @@
+TechAvı alarm + push fix
+
+- Alarm API now receives store keys (trendyol/hepsiburada/n11/etc.) instead of display names.
+- Target price input is larger and readable, with mobile-friendly layout.
+- Amazon Türkiye, Pazarama and Çiçeksepeti are mapped for alarms.
+- Push subscription waits for an active Service Worker via navigator.serviceWorker.ready.
+- Existing pricing logic in server.js was not changed by this fix.
+
+Arama stabilite/hız düzeltmesi
+- ReefAPI çağrıları ortak bir kuyruk üzerinden tek tek gönderiliyor; kısa rolling rate-limit nedeniyle mağazaların topluca 0 dönmesi engelleniyor.
+- Amazon/Bright Data Reef kuyruğundan bağımsız çalışıyor.
+- /api/search/store eklendi: her mağaza kendi HTTP yanıtını döndürüyor.
+- Ön yüz mağaza sonuçlarını tek tek ekrana basıyor; tüm mağazaların bitmesini beklemiyor.
+- Mevcut API çağrı sayısı artırılmadı; her mağaza için yine tek arama çağrısı yapılıyor.
