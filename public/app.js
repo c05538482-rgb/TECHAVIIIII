@@ -8,11 +8,12 @@ const state = {
   selected: null,
   query: "",
   activeStore: "all",
-  viewMode: "all",
   searchTimer: null,
   controller: null,
   requestId: 0,
-  storeCounts: { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null, a101:null, bim:null, carrefoursa:null, flo:null, getir:null, hm:null, ikea:null, migros:null, watsons:null },
+  lastSearchStartedAt: 0,
+  lastSearchQuery: "",
+  storeCounts: { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null },
   favorites: new Set(JSON.parse(localStorage.getItem("techavi_favs") || "[]"))
 };
 
@@ -64,9 +65,22 @@ function storeName(s) {
     amazon:"Amazon Türkiye",
     pazarama:"Pazarama",
     ciceksepeti:"Çiçeksepeti",
-    boyner:"Boyner",
-    a101:"A-101", bim:"BİM", carrefoursa:"CarrefourSA", flo:"FLO", getir:"Getir", hm:"H&M", ikea:"IKEA", migros:"Migros Sanalmarket", watsons:"Watsons Türkiye"
+    boyner:"Boyner"
   }[String(s).toLowerCase()] || s || "Mağaza");
+}
+function storeKey(s) {
+  const x = String(s || "").toLowerCase().trim();
+  if (x.includes("trendyol")) return "trendyol";
+  if (x.includes("hepsiburada")) return "hepsiburada";
+  if (x === "n11" || x.includes("n11")) return "n11";
+  if (x.includes("mediamarkt")) return "mediamarkt";
+  if (x.includes("teknosa")) return "teknosa";
+  if (x.includes("vatan")) return "vatan";
+  if (x.includes("amazon")) return "amazon";
+  if (x.includes("pazarama")) return "pazarama";
+  if (x.includes("ciceksepeti") || x.includes("çiçeksepeti")) return "ciceksepeti";
+  if (x.includes("boyner") || x.includes("morhipo")) return "boyner";
+  return x;
 }
 function storeKey(s) {
   const x = String(s || "").toLowerCase();
@@ -80,15 +94,6 @@ function storeKey(s) {
   if (x.includes("pazarama")) return "pazarama";
   if (x.includes("ciceksepeti") || x.includes("çiçeksepeti")) return "ciceksepeti";
   if (x.includes("boyner") || x.includes("morhipo")) return "boyner";
-  if (x.includes("a101")) return "a101";
-  if (x === "bim" || x.includes("bim")) return "bim";
-  if (x.includes("carrefoursa")) return "carrefoursa";
-  if (x.includes("flo")) return "flo";
-  if (x.includes("getir")) return "getir";
-  if (x === "h&m" || x.includes("h&m") || x.includes("hm")) return "hm";
-  if (x.includes("ikea")) return "ikea";
-  if (x.includes("migros")) return "migros";
-  if (x.includes("watsons")) return "watsons";
   return x;
 }
 
@@ -115,39 +120,21 @@ function renderCard(p) {
 }
 
 function renderStoreCounts() {
-  for (const key of ["trendyol", "hepsiburada", "n11", "amazon", "mediamarkt", "teknosa", "vatan", "pazarama", "ciceksepeti", "boyner", "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"]) {
+  for (const key of ["trendyol", "hepsiburada", "n11", "amazon", "mediamarkt", "teknosa", "vatan", "pazarama", "ciceksepeti", "boyner"]) {
     const value = state.storeCounts[key];
     $(`#count-${key}`).textContent = value == null ? "Arama bekleniyor" : `${Number(value).toLocaleString("tr-TR")} ürün bulundu`;
   }
 }
 
-function getDiscountPercent(p) {
-  const price = Number(p.price);
-  const original = Number(p.originalPrice);
-  if (!Number.isFinite(price) || !Number.isFinite(original) || original <= price || original <= 0) return 0;
-  return Math.round((1 - price / original) * 100);
-}
-
-function applyViewMode(items) {
-  const list = items.slice();
-  if (state.viewMode === "deals") return list.filter(p => getDiscountPercent(p) >= 10).sort((a,b) => getDiscountPercent(b) - getDiscountPercent(a));
-  if (state.viewMode === "drops") return list.filter(p => getDiscountPercent(p) > 0).sort((a,b) => getDiscountPercent(b) - getDiscountPercent(a));
-  if (state.viewMode === "lowest") return list.filter(p => Number.isFinite(Number(p.price)) && Number(p.price) > 0).sort((a,b) => Number(a.price) - Number(b.price));
-  return list;
-}
-
 function render() {
   let items = state.allProducts.slice();
   if (state.activeStore !== "all") items = items.filter(p => storeKey(p.store) === state.activeStore);
-  items = applyViewMode(items);
 
-  const viewTitles = { all: "🔎", deals: "🔥 Fırsatlar", drops: "📉 Fiyat Düşüşleri", lowest: "🏆 Dip Fiyatlar" };
   $("#resultCount").textContent = state.query ? `• ${items.length} gösterilen ürün` : "";
-  $("#sectionTitle").textContent = state.query ? `${viewTitles[state.viewMode] || "🔎"} "${state.query}"` : "🔎 Ürün ara";
+  $("#sectionTitle").textContent = state.query ? `🔎 "${state.query}" sonuçları` : "🔎 Ürün ara";
 
   if (!state.query) {
-    const labels = { deals: "Fırsatları görmek için önce bir ürün ara.", drops: "Fiyat düşüşlerini görmek için önce bir ürün ara.", lowest: "Dip fiyatları görmek için önce bir ürün ara." };
-    $("#grid").innerHTML = `<div class="empty-grid"><div><div style="font-size:38px;margin-bottom:10px">⌕</div><b>${labels[state.viewMode] || "Bir ürün ara"}</b><br><span>Örneğin: RTX 5070, LEGO Technic Supra MK4 veya ASUS TUF</span></div></div>`;
+    $("#grid").innerHTML = `<div class="empty-grid"><div><div style="font-size:38px;margin-bottom:10px">⌕</div><b>Bir ürün ara</b><br><span>Örneğin: RTX 5070, LEGO Technic Supra MK4 veya ASUS TUF</span></div></div>`;
     return;
   }
 
@@ -203,27 +190,38 @@ function showLoading(q) {
   renderApiUsage(null);
   $("#sectionTitle").textContent = `🔎 "${q}" aranıyor`;
   $("#resultCount").textContent = "• mağazalar kontrol ediliyor...";
-  $("#grid").innerHTML = `<div class="loading-grid"><div class="loading-spinner"></div><span>Trendyol, Hepsiburada, n11, MediaMarkt, Teknosa, Vatan, Amazon, Pazarama, Çiçeksepeti, Boyner ve yeni mağazalar aranıyor…</span></div>`;
+  $("#grid").innerHTML = `<div class="loading-grid"><div class="loading-spinner"></div><span>Trendyol, Hepsiburada, n11, MediaMarkt, Teknosa, Vatan, Amazon, Pazarama, Çiçeksepeti ve Boyner aranıyor…</span></div>`;
 }
 
 async function searchProducts(q) {
   const clean = q.trim();
+  const now = Date.now();
+  const cooldown = 3500;
+
+  if (clean.length >= 2) {
+    if (state.controller) {
+      toast("Arama devam ediyor; sonuçların gelmesini bekle.");
+      return;
+    }
+    if (now - state.lastSearchStartedAt < cooldown) {
+      const left = Math.max(1, Math.ceil((cooldown - (now - state.lastSearchStartedAt)) / 1000));
+      toast(state.lastSearchQuery === clean ? "Bu arama az önce gönderildi." : `Yeni arama için ${left} saniye bekle.`);
+      return;
+    }
+    state.lastSearchStartedAt = now;
+    state.lastSearchQuery = clean;
+  }
+
   state.query = clean;
   state.activeStore = "all";
+  renderStoreCounts();
 
   if (state.controller) state.controller.abort();
   const myId = ++state.requestId;
-  state.viewMode = "all";
-
-  const emptyCounts = {
-    trendyol: null, hepsiburada: null, n11: null, mediamarkt: null,
-    teknosa: null, vatan: null, amazon: null, pazarama: null,
-    ciceksepeti: null, boyner: null, a101:null, bim:null, carrefoursa:null, flo:null, getir:null, hm:null, ikea:null, migros:null, watsons:null
-  };
 
   if (clean.length < 2) {
     state.allProducts = [];
-    state.storeCounts = emptyCounts;
+    state.storeCounts = { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null };
     renderStoreCounts();
     render();
     return;
@@ -233,86 +231,48 @@ async function searchProducts(q) {
   const controller = new AbortController();
   state.controller = controller;
 
-  // Each store gets its own request. Results are painted as soon as that
-  // store finishes; no extra provider calls are made.
-  const stores = [
-    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa",
-    "vatan", "amazon", "pazarama", "ciceksepeti", "boyner",
-    "a101", "bim", "carrefoursa", "flo", "getir", "hm", "ikea", "migros", "watsons"
-  ];
-  const results = {};
-  const errors = {};
-  const usage = { stores: {}, totalReefCredits: 0, totalBrightDataRecords: 0 };
-
-  state.allProducts = [];
-  state.storeCounts = { ...emptyCounts };
-  renderStoreCounts();
-  render();
-
-  const runStore = async (store) => {
-    try {
-      // Browser-side safety net: no individual store can keep this search
-      // open for more than 29 seconds. Other stores continue independently.
-      const storeController = new AbortController();
-      const onMainAbort = () => storeController.abort();
-      controller.signal.addEventListener("abort", onMainAbort, { once: true });
-      const timeout = setTimeout(() => storeController.abort(), 29000);
-      const r = await fetch(`/api/search/store?store=${encodeURIComponent(store)}&q=${encodeURIComponent(clean)}`, {
-        signal: storeController.signal,
-        headers: { Accept: "application/json" }
-      });
-      clearTimeout(timeout);
-      controller.signal.removeEventListener("abort", onMainAbort);
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error(j.error || "Arama başarısız.");
-      if (myId !== state.requestId) return;
-
-      const result = j.result || {};
-      results[store] = result;
-      state.storeCounts[store] = Number(result.count ?? 0);
-      const rows = Array.isArray(result.products) ? result.products : [];
-      state.allProducts.push(...rows);
-
-      usage.stores[store] = result.usage || {
-        provider: store === "amazon" ? "Bright Data" : "ReefAPI",
-        reefCredits: 0, brightDataRecords: 0, cached: Boolean(result.cached)
-      };
-      usage.totalReefCredits = Object.values(usage.stores).reduce((sum, x) => sum + Number(x.reefCredits || 0), 0);
-      usage.totalBrightDataRecords = Object.values(usage.stores).reduce((sum, x) => sum + Number(x.brightDataRecords || 0), 0);
-
-      renderStoreCounts();
-      render();
-      renderApiUsage(usage);
-    } catch (e) {
-      if (e.name === "AbortError") {
-        if (myId === state.requestId && !controller.signal.aborted) {
-          errors[store] = "Mağaza 29 saniyede yanıt vermedi.";
-          state.storeCounts[store] = 0;
-          renderStoreCounts();
-          render();
-        }
-        return;
-      }
-      if (myId !== state.requestId) return;
-      errors[store] = e.message || "Arama başarısız";
-      state.storeCounts[store] = 0;
-      renderStoreCounts();
-      render();
-    }
-  };
-
   try {
-    await Promise.all(stores.map(runStore));
+    const r = await fetch(`/api/search?q=${encodeURIComponent(clean)}`, {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+    const j = await r.json().catch(() => ({}));
     if (myId !== state.requestId) return;
-    if (!Object.keys(results).length) {
-      renderApiUsage(usage);
-      $("#resultCount").textContent = "";
-      $("#grid").innerHTML = `<div class="empty-grid"><div><b>Mağazalardan veri alınamadı.</b><br><span>ReefAPI anahtarını ve Render ortam değişkenlerini kontrol et.</span></div></div>`;
-    } else if (Object.keys(errors).length) {
-      toast(`${Object.keys(results).length} mağaza yanıt verdi; ${Object.keys(errors).length} mağaza yanıt vermedi.`);
+    if (!r.ok) {
+      if (r.status === 429) {
+        const retry = Number(j.retryAfter || 3);
+        throw new Error(j.error || `Çok sık arama. ${retry} saniye bekle.`);
+      }
+      throw new Error(j.error || "Arama başarısız.");
     }
+
+    state.allProducts = Array.isArray(j.products) ? j.products : [];
+    state.storeCounts = {
+      trendyol: j.stores?.trendyol?.count ?? 0,
+      hepsiburada: j.stores?.hepsiburada?.count ?? 0,
+      n11: j.stores?.n11?.count ?? 0,
+      mediamarkt: j.stores?.mediamarkt?.count ?? 0,
+      teknosa: j.stores?.teknosa?.count ?? 0,
+      vatan: j.stores?.vatan?.count ?? 0,
+      amazon: j.stores?.amazon?.count ?? 0,
+      pazarama: j.stores?.pazarama?.count ?? 0,
+      ciceksepeti: j.stores?.ciceksepeti?.count ?? 0,
+      boyner: j.stores?.boyner?.count ?? 0
+    };
+    renderStoreCounts();
+    render();
+    renderApiUsage(j.usage);
+
+    const errors = Object.values(j.errors || {});
+    if (errors.length === 3) toast("Mağazalardan veri alınamadı. ReefAPI bağlantısını kontrol et.");
+    else if (errors.length) toast("Bazı mağazalar bu aramada yanıt vermedi.");
   } catch (e) {
-    if (e.name !== "AbortError" && myId === state.requestId) toast(e.message || "Arama başarısız.");
+    if (e.name === "AbortError") return;
+    if (myId !== state.requestId) return;
+    state.allProducts = [];
+    renderApiUsage(null);
+    $("#resultCount").textContent = "";
+    $("#grid").innerHTML = `<div class="empty-grid"><div><b>Arama sırasında hata oluştu.</b><br><span>${esc(e.message)}</span></div></div>`;
   } finally {
     if (myId === state.requestId) state.controller = null;
   }
@@ -495,22 +455,9 @@ function setStoreFilter(key) {
   render();
 }
 
-function setViewMode(mode) {
-  state.viewMode = mode;
-  $$('[data-page]').forEach(b => b.classList.toggle('nav-active', b.dataset.page === mode || (mode === 'all' && b.dataset.page === 'home')));
-  document.body.classList.toggle('deal-view-active', mode !== 'all');
-  render();
-}
-
-let deferredInstallPrompt = null;
-window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstallPrompt=e; const b=$("#installBtn"); if(b) b.classList.remove("hidden"); });
-window.addEventListener("appinstalled", () => { deferredInstallPrompt=null; const b=$("#installBtn"); if(b) b.classList.add("hidden"); toast("TechAvı uygulaması kuruldu."); });
-function setupInstallButton(){ const b=$("#installBtn"); if(!b)return; b.onclick=async()=>{ if(deferredInstallPrompt){ deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice; deferredInstallPrompt=null; b.classList.add("hidden"); } else toast("Tarayıcı menüsünden 'Uygulamayı yükle' seçeneğini kullanabilirsin."); }; }
-
 function init() {
   updateCounts();
   renderStoreCounts();
-  setupInstallButton();
   loadMe();
   setupSuggestions();
 
