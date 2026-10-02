@@ -355,9 +355,9 @@ async function enrichN11Rows(rows) {
         continue;
       }
 
-      // Only enrich the first 3 n11 rows. Each n11 detail call costs 2 ReefAPI
-      // credits, so this caps n11 detail usage at 6 credits per search.
-      if (index >= 3) {
+      // Only enrich the first 5 n11 rows. This keeps the live basket-price
+      // check useful without spending a ReefAPI detail call on every result.
+      if (index >= 5) {
         enriched[index] = row;
         continue;
       }
@@ -1027,6 +1027,29 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+// Search abuse protection: repeated Enter/key presses should not create
+// unnecessary ReefAPI/Bright Data requests. Normal users are unaffected.
+const SEARCH_COOLDOWN_MS = Math.max(3000, Number(process.env.SEARCH_COOLDOWN_MS || 8000));
+const SEARCH_LOCK_TTL_MS = 120000;
+const searchRateState = new Map();
+const activeSearches = new Map();
+
+function clientKey(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.ip || "unknown";
+}
+
+function cleanupSearchGuards(now = Date.now()) {
+  for (const [key, value] of searchRateState) {
+    if (now - value.startedAt > SEARCH_LOCK_TTL_MS) searchRateState.delete(key);
+  }
+  for (const [key, startedAt] of activeSearches) {
+    if (now - startedAt > SEARCH_LOCK_TTL_MS) activeSearches.delete(key);
+  }
+}
+
+setInterval(() => cleanupSearchGuards(), 60000).unref();
+
 app.get("/api/search", async (req, res) => {
   const query = normalizeQuery(req.query.q);
   if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
@@ -1035,6 +1058,35 @@ app.get("/api/search", async (req, res) => {
     "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
     "amazon", "pazarama", "ciceksepeti", "boyner"
   ];
+
+  const now = Date.now();
+  cleanupSearchGuards(now);
+  const client = clientKey(req);
+  const guardKey = `${client}|${query}`;
+  const recent = searchRateState.get(client);
+
+  if (activeSearches.has(guardKey)) {
+    return res.status(429).json({
+      ok: false,
+      error: "Bu arama zaten devam ediyor. Sonuçların gelmesini bekle.",
+      retryAfter: 3,
+      code: "SEARCH_IN_PROGRESS"
+    });
+  }
+
+  if (recent && now - recent.startedAt < SEARCH_COOLDOWN_MS) {
+    const retryAfter = Math.max(1, Math.ceil((SEARCH_COOLDOWN_MS - (now - recent.startedAt)) / 1000));
+    return res.status(429).json({
+      ok: false,
+      error: `Çok sık arama yapıldı. Lütfen ${retryAfter} saniye bekle.`,
+      retryAfter,
+      code: "SEARCH_COOLDOWN"
+    });
+  }
+
+  searchRateState.set(client, { startedAt: now, query });
+  activeSearches.set(guardKey, now);
+  res.on("finish", () => activeSearches.delete(guardKey));
   const results = {};
   const errors = {};
 

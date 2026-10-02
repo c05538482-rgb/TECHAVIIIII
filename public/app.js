@@ -11,6 +11,8 @@ const state = {
   searchTimer: null,
   controller: null,
   requestId: 0,
+  lastSearchStartedAt: 0,
+  lastSearchQuery: "",
   storeCounts: { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null },
   favorites: new Set(JSON.parse(localStorage.getItem("techavi_favs") || "[]"))
 };
@@ -193,6 +195,23 @@ function showLoading(q) {
 
 async function searchProducts(q) {
   const clean = q.trim();
+  const now = Date.now();
+  const cooldown = 3500;
+
+  if (clean.length >= 2) {
+    if (state.controller) {
+      toast("Arama devam ediyor; sonuçların gelmesini bekle.");
+      return;
+    }
+    if (now - state.lastSearchStartedAt < cooldown) {
+      const left = Math.max(1, Math.ceil((cooldown - (now - state.lastSearchStartedAt)) / 1000));
+      toast(state.lastSearchQuery === clean ? "Bu arama az önce gönderildi." : `Yeni arama için ${left} saniye bekle.`);
+      return;
+    }
+    state.lastSearchStartedAt = now;
+    state.lastSearchQuery = clean;
+  }
+
   state.query = clean;
   state.activeStore = "all";
   renderStoreCounts();
@@ -219,7 +238,13 @@ async function searchProducts(q) {
     });
     const j = await r.json().catch(() => ({}));
     if (myId !== state.requestId) return;
-    if (!r.ok) throw new Error(j.error || "Arama başarısız.");
+    if (!r.ok) {
+      if (r.status === 429) {
+        const retry = Number(j.retryAfter || 3);
+        throw new Error(j.error || `Çok sık arama. ${retry} saniye bekle.`);
+      }
+      throw new Error(j.error || "Arama başarısız.");
+    }
 
     state.allProducts = Array.isArray(j.products) ? j.products : [];
     state.storeCounts = {
