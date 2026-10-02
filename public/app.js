@@ -11,8 +11,6 @@ const state = {
   searchTimer: null,
   controller: null,
   requestId: 0,
-  lastSearchStartedAt: 0,
-  lastSearchQuery: "",
   storeCounts: { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null },
   favorites: new Set(JSON.parse(localStorage.getItem("techavi_favs") || "[]"))
 };
@@ -195,84 +193,96 @@ function showLoading(q) {
 
 async function searchProducts(q) {
   const clean = q.trim();
-  const now = Date.now();
-  const cooldown = 3500;
-
-  if (clean.length >= 2) {
-    if (state.controller) {
-      toast("Arama devam ediyor; sonuçların gelmesini bekle.");
-      return;
-    }
-    if (now - state.lastSearchStartedAt < cooldown) {
-      const left = Math.max(1, Math.ceil((cooldown - (now - state.lastSearchStartedAt)) / 1000));
-      toast(state.lastSearchQuery === clean ? "Bu arama az önce gönderildi." : `Yeni arama için ${left} saniye bekle.`);
-      return;
-    }
-    state.lastSearchStartedAt = now;
-    state.lastSearchQuery = clean;
-  }
-
   state.query = clean;
   state.activeStore = "all";
-  renderStoreCounts();
 
   if (state.controller) state.controller.abort();
   const myId = ++state.requestId;
 
+  const emptyCounts = {
+    trendyol: null, hepsiburada: null, n11: null, mediamarkt: null,
+    teknosa: null, vatan: null, amazon: null, pazarama: null,
+    ciceksepeti: null, boyner: null
+  };
+
   if (clean.length < 2) {
     state.allProducts = [];
-    state.storeCounts = { trendyol: null, hepsiburada: null, n11: null, mediamarkt: null, teknosa: null, vatan: null, amazon: null, pazarama: null, ciceksepeti: null, boyner: null };
+    state.storeCounts = { ...emptyCounts };
     renderStoreCounts();
     render();
     return;
   }
 
   showLoading(clean);
+  state.allProducts = [];
+  state.storeCounts = { ...emptyCounts };
+  renderStoreCounts();
+
   const controller = new AbortController();
   state.controller = controller;
+  const stores = [
+    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
+    "amazon", "pazarama", "ciceksepeti", "boyner"
+  ];
+  const errors = [];
+  const usageStores = {};
+
+  const updateUsage = () => {
+    const totalReefCredits = Object.values(usageStores)
+      .reduce((sum, x) => sum + Number(x?.reefCredits || 0), 0);
+    const totalBrightDataRecords = Object.values(usageStores)
+      .reduce((sum, x) => sum + Number(x?.brightDataRecords || 0), 0);
+    renderApiUsage({
+      stores: usageStores,
+      totalReefCredits,
+      totalBrightDataRecords
+    });
+  };
+
+  const fetchStore = async (store) => {
+    try {
+      const r = await fetch(`/api/search/store?store=${encodeURIComponent(store)}&q=${encodeURIComponent(clean)}`, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" }
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Arama başarısız.");
+      if (myId !== state.requestId) return;
+
+      const result = j.result || {};
+      state.storeCounts[store] = Number(result.count || 0);
+      usageStores[store] = result.usage || { reefCredits: 0, brightDataRecords: 0, cached: Boolean(result.cached) };
+      if (Array.isArray(result.products) && result.products.length) {
+        state.allProducts.push(...result.products);
+      }
+
+      // Render immediately: fast stores appear without waiting for slower stores.
+      renderStoreCounts();
+      render();
+      updateUsage();
+    } catch (e) {
+      if (e?.name === "AbortError" || myId !== state.requestId) return;
+      errors.push(store);
+      state.storeCounts[store] = 0;
+      renderStoreCounts();
+      render();
+    }
+  };
 
   try {
-    const r = await fetch(`/api/search?q=${encodeURIComponent(clean)}`, {
-      signal: controller.signal,
-      headers: { Accept: "application/json" }
-    });
-    const j = await r.json().catch(() => ({}));
+    // All stores are requested at once. Each store has its own response, so a
+    // slow provider no longer blocks the results from faster providers.
+    await Promise.all(stores.map(fetchStore));
     if (myId !== state.requestId) return;
-    if (!r.ok) {
-      if (r.status === 429) {
-        const retry = Number(j.retryAfter || 3);
-        throw new Error(j.error || `Çok sık arama. ${retry} saniye bekle.`);
-      }
-      throw new Error(j.error || "Arama başarısız.");
+
+    updateUsage();
+    if (errors.length === stores.length) {
+      toast("Mağazalardan veri alınamadı. ReefAPI bağlantısını kontrol et.");
+    } else if (errors.length) {
+      toast(`${errors.length} mağaza bu aramada yanıt vermedi.`);
     }
-
-    state.allProducts = Array.isArray(j.products) ? j.products : [];
-    state.storeCounts = {
-      trendyol: j.stores?.trendyol?.count ?? 0,
-      hepsiburada: j.stores?.hepsiburada?.count ?? 0,
-      n11: j.stores?.n11?.count ?? 0,
-      mediamarkt: j.stores?.mediamarkt?.count ?? 0,
-      teknosa: j.stores?.teknosa?.count ?? 0,
-      vatan: j.stores?.vatan?.count ?? 0,
-      amazon: j.stores?.amazon?.count ?? 0,
-      pazarama: j.stores?.pazarama?.count ?? 0,
-      ciceksepeti: j.stores?.ciceksepeti?.count ?? 0,
-      boyner: j.stores?.boyner?.count ?? 0
-    };
-    renderStoreCounts();
-    render();
-    renderApiUsage(j.usage);
-
-    const errors = Object.values(j.errors || {});
-    if (errors.length === 3) toast("Mağazalardan veri alınamadı. ReefAPI bağlantısını kontrol et.");
-    else if (errors.length) toast("Bazı mağazalar bu aramada yanıt vermedi.");
   } catch (e) {
-    if (e.name === "AbortError") return;
-    if (myId !== state.requestId) return;
-    state.allProducts = [];
-    renderApiUsage(null);
-    $("#resultCount").textContent = "";
-    $("#grid").innerHTML = `<div class="empty-grid"><div><b>Arama sırasında hata oluştu.</b><br><span>${esc(e.message)}</span></div></div>`;
+    if (e?.name === "AbortError" || myId !== state.requestId) return;
   } finally {
     if (myId === state.requestId) state.controller = null;
   }

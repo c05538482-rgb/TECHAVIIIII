@@ -1027,28 +1027,24 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-// Search abuse protection: repeated Enter/key presses should not create
-// unnecessary ReefAPI/Bright Data requests. Normal users are unaffected.
-const SEARCH_COOLDOWN_MS = Math.max(3000, Number(process.env.SEARCH_COOLDOWN_MS || 8000));
-const SEARCH_LOCK_TTL_MS = 120000;
-const searchRateState = new Map();
-const activeSearches = new Map();
+app.get("/api/search/store", async (req, res) => {
+  const query = normalizeQuery(req.query.q);
+  const store = String(req.query.store || "").trim().toLowerCase();
+  const allowedStores = [
+    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
+    "amazon", "pazarama", "ciceksepeti", "boyner"
+  ];
+  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
+  if (!allowedStores.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
 
-function clientKey(req) {
-  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-  return forwarded || req.ip || "unknown";
-}
-
-function cleanupSearchGuards(now = Date.now()) {
-  for (const [key, value] of searchRateState) {
-    if (now - value.startedAt > SEARCH_LOCK_TTL_MS) searchRateState.delete(key);
+  try {
+    const result = await searchStore(store, query);
+    res.json({ ok: true, query, store, result });
+  } catch (e) {
+    console.error(`[SEARCH][${store}]`, e);
+    res.status(502).json({ ok: false, query, store, error: e?.message || "Arama başarısız" });
   }
-  for (const [key, startedAt] of activeSearches) {
-    if (now - startedAt > SEARCH_LOCK_TTL_MS) activeSearches.delete(key);
-  }
-}
-
-setInterval(() => cleanupSearchGuards(), 60000).unref();
+});
 
 app.get("/api/search", async (req, res) => {
   const query = normalizeQuery(req.query.q);
@@ -1058,35 +1054,6 @@ app.get("/api/search", async (req, res) => {
     "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
     "amazon", "pazarama", "ciceksepeti", "boyner"
   ];
-
-  const now = Date.now();
-  cleanupSearchGuards(now);
-  const client = clientKey(req);
-  const guardKey = `${client}|${query}`;
-  const recent = searchRateState.get(client);
-
-  if (activeSearches.has(guardKey)) {
-    return res.status(429).json({
-      ok: false,
-      error: "Bu arama zaten devam ediyor. Sonuçların gelmesini bekle.",
-      retryAfter: 3,
-      code: "SEARCH_IN_PROGRESS"
-    });
-  }
-
-  if (recent && now - recent.startedAt < SEARCH_COOLDOWN_MS) {
-    const retryAfter = Math.max(1, Math.ceil((SEARCH_COOLDOWN_MS - (now - recent.startedAt)) / 1000));
-    return res.status(429).json({
-      ok: false,
-      error: `Çok sık arama yapıldı. Lütfen ${retryAfter} saniye bekle.`,
-      retryAfter,
-      code: "SEARCH_COOLDOWN"
-    });
-  }
-
-  searchRateState.set(client, { startedAt: now, query });
-  activeSearches.set(guardKey, now);
-  res.on("finish", () => activeSearches.delete(guardKey));
   const results = {};
   const errors = {};
 
@@ -1101,21 +1068,16 @@ app.get("/api/search", async (req, res) => {
     }
   }
 
-  // ReefAPI is deliberately kept below its short rolling request limit.
-  // Two stores at a time is slower than a burst, but prevents one search from
-  // making every other store fail with RATE_LIMITED. Amazon remains independent.
-  for (let i = 0; i < stores.length; i += 2) {
-    const batch = stores.slice(i, i + 2);
-    const settled = await Promise.allSettled(batch.map(store => searchWithRetry(store)));
-    settled.forEach((r, idx) => {
-      const store = batch[idx];
+  // Run all stores concurrently so one slow store cannot hold the entire response.
+  const settled = await Promise.allSettled(stores.map(store => searchWithRetry(store)));
+  settled.forEach((r, idx) => {
+      const store = stores[idx];
       if (r.status === "fulfilled") results[store] = r.value;
       else {
         errors[store] = r.reason?.message || "Arama başarısız";
         console.error(`[SEARCH][${store}]`, r.reason);
       }
-    });
-  }
+  });
 
   const products = Object.values(results).flatMap(x => x.products || []);
   const usage = Object.fromEntries(
