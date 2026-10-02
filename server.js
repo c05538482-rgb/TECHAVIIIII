@@ -355,9 +355,9 @@ async function enrichN11Rows(rows) {
         continue;
       }
 
-      // Only enrich the first 5 n11 rows. This keeps the live basket-price
-      // check useful without spending a ReefAPI detail call on every result.
-      if (index >= 5) {
+      // Only enrich the first 3 n11 rows. Each n11 detail call costs 2 ReefAPI
+      // credits, so this caps n11 detail usage at 6 credits per search.
+      if (index >= 3) {
         enriched[index] = row;
         continue;
       }
@@ -1027,25 +1027,6 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-app.get("/api/search/store", async (req, res) => {
-  const query = normalizeQuery(req.query.q);
-  const store = String(req.query.store || "").trim().toLowerCase();
-  const allowedStores = [
-    "trendyol", "hepsiburada", "n11", "mediamarkt", "teknosa", "vatan",
-    "amazon", "pazarama", "ciceksepeti", "boyner"
-  ];
-  if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
-  if (!allowedStores.includes(store)) return res.status(400).json({ ok: false, error: "Desteklenmeyen mağaza." });
-
-  try {
-    const result = await searchStore(store, query);
-    res.json({ ok: true, query, store, result });
-  } catch (e) {
-    console.error(`[SEARCH][${store}]`, e);
-    res.status(502).json({ ok: false, query, store, error: e?.message || "Arama başarısız" });
-  }
-});
-
 app.get("/api/search", async (req, res) => {
   const query = normalizeQuery(req.query.q);
   if (query.length < 2) return res.status(400).json({ ok: false, error: "En az 2 karakter yaz." });
@@ -1068,16 +1049,21 @@ app.get("/api/search", async (req, res) => {
     }
   }
 
-  // Run all stores concurrently so one slow store cannot hold the entire response.
-  const settled = await Promise.allSettled(stores.map(store => searchWithRetry(store)));
-  settled.forEach((r, idx) => {
-      const store = stores[idx];
+  // ReefAPI is deliberately kept below its short rolling request limit.
+  // Two stores at a time is slower than a burst, but prevents one search from
+  // making every other store fail with RATE_LIMITED. Amazon remains independent.
+  for (let i = 0; i < stores.length; i += 2) {
+    const batch = stores.slice(i, i + 2);
+    const settled = await Promise.allSettled(batch.map(store => searchWithRetry(store)));
+    settled.forEach((r, idx) => {
+      const store = batch[idx];
       if (r.status === "fulfilled") results[store] = r.value;
       else {
         errors[store] = r.reason?.message || "Arama başarısız";
         console.error(`[SEARCH][${store}]`, r.reason);
       }
-  });
+    });
+  }
 
   const products = Object.values(results).flatMap(x => x.products || []);
   const usage = Object.fromEntries(
